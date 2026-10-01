@@ -61,6 +61,9 @@ class EpubCheckTool:
 
 def discover(config: ValidateConfig, *, extra_roots: list[Path] | None = None) -> EpubCheckTool:
     """按优先级找到可用的 EPUBCheck。"""
+    if config.epubcheck_mode == "off":
+        return EpubCheckTool(reason='已按配置关闭（validate.epubcheck_mode = "off"）')
+
     java = _find_java(config.java_cmd)
 
     # 1) 显式配置

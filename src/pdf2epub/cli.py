@@ -29,7 +29,7 @@ from typing import Any, Sequence
 
 from . import __version__, epubcheck, pageimage
 from .alerts import AlertCode, AlertSink, Severity
-from .config import DEFAULT_CONFIG_NAME, Config, load_config
+from .config import DEFAULT_CONFIG_NAME, DEFAULT_ENV_NAME, Config, load_config
 from .errors import ConfigError, Pdf2EpubError
 from .logutil import get_logger, reset_logging, set_context, setup_logging
 from .pipeline import Pipeline, PipelineOptions
@@ -449,6 +449,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     workdir = Path(config.workdir)
     record("工作目录", True, f"{workdir}（将自动创建）")
     record("配置文件", True, config.source_path or f"未找到 {DEFAULT_CONFIG_NAME}，使用内置默认值")
+    record("环境文件", True, config.env_path or f"未找到 {DEFAULT_ENV_NAME}（可用它放 MINERU_TOKEN）")
 
     printer.set("checks", checks)
     failed = [c for c in checks if not c["ok"]]

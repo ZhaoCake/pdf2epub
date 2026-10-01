@@ -394,15 +394,7 @@ class Pipeline:
         if not build_dir.is_dir():
             raise BuildError(f"构建目录不存在：{build_dir}")
 
-        tool = epubcheck_mod.discover(self.config.validate)
-        if not tool.available:
-            emit = self.alerts.error if self.config.validate.require_epubcheck else self.alerts.warn
-            emit(
-                AlertCode.EPUBCHECK_UNAVAILABLE,
-                f"EPUBCheck 不可用：{tool.reason}",
-                hint="下载 https://github.com/w3c/epubcheck/releases 并设置 EPUBCHECK_JAR",
-            )
-
+        mode = self.config.validate.epubcheck_mode
         packed = epubpack.build_package(build_dir, identifier_seed=self.run.source_hash)
         for warning in packed.warnings:
             self.alerts.warn(AlertCode.FORMAT_FAILED, warning)
@@ -410,6 +402,17 @@ class Pipeline:
 
         output = epubpack.pack(build_dir, self.run.output_epub())
         result = formatcheck.run_check(self.run, self.config.validate, output=output)
+
+        if not result.epubcheck_ran and mode != "off":
+            # off 是用户显式选择，不必每轮再提醒他一次；
+            # 其余情况必须说清"这道校验没跑"，不能和"跑过了"混为一谈。
+            emit = self.alerts.error if mode == "require" else self.alerts.warn
+            emit(
+                AlertCode.EPUBCHECK_UNAVAILABLE,
+                f"EPUBCheck 没有跑成，本次只做了自检：{result.epubcheck_reason}",
+                hint="下载 https://github.com/w3c/epubcheck/releases，"
+                "把 epubcheck.jar 放进 tools/ 或设置 EPUBCHECK_JAR",
+            )
 
         self.run.counters["check"] = {
             "passed": result.passed,

@@ -32,6 +32,10 @@ class CheckResult:
     report: LintReport
     output: Path
     epubcheck: dict[str, Any] = field(default_factory=dict)
+    #: 外部 EPUBCheck 到底跑没跑成。没跑成时必须让上游知道——
+    #: "只跑了自检"和"跑了两道校验"是两回事，不能都叫"通过"。
+    epubcheck_ran: bool = True
+    epubcheck_reason: str = ""
 
     @property
     def blocking(self) -> list[Issue]:
@@ -41,6 +45,8 @@ class CheckResult:
         return {
             "passed": self.passed,
             "output": str(self.output),
+            "epubcheck_ran": self.epubcheck_ran,
+            "epubcheck_reason": self.epubcheck_reason,
             "epubcheck": self.epubcheck,
             "report": self.report.to_dict(limit=limit),
         }
@@ -54,10 +60,13 @@ def run_check(run: Run, config: ValidateConfig, *, output: Path | None = None) -
     external = epubcheck_mod.run(output, config)
     if not external.ran:
         reason = external.error or "未找到 epubcheck"
-        if config.require_epubcheck:
+        if config.epubcheck_mode == "require":
             raise ValidationError(
                 f"未执行 EPUBCheck，但配置要求必须执行：{reason}",
-                detail={"hint": "设置 EPUBCHECK_JAR 或把 validate.require_epubcheck 设为 false"},
+                detail={
+                    "hint": "把 epubcheck.jar 放进 tools/ 或设置 EPUBCHECK_JAR；"
+                    "也可以把 validate.epubcheck_mode 改成 auto/off"
+                },
             )
         log.warning("EPUBCheck 未执行：%s", reason)
 
@@ -78,6 +87,8 @@ def run_check(run: Run, config: ValidateConfig, *, output: Path | None = None) -
             "passed": passed,
             "fail_on": config.fail_on_severity.upper(),
             "epubcheck": epubcheck_mod.tool_info(config),
+            "epubcheck_ran": external.ran,
+            "epubcheck_reason": "" if external.ran else (external.error or "未找到 epubcheck"),
             "report": report.to_dict(limit=200),
         },
     )
@@ -94,6 +105,8 @@ def run_check(run: Run, config: ValidateConfig, *, output: Path | None = None) -
         report=report,
         output=output,
         epubcheck=epubcheck_mod.tool_info(config),
+        epubcheck_ran=external.ran,
+        epubcheck_reason="" if external.ran else (external.error or "未找到 epubcheck"),
     )
 
 

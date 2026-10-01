@@ -41,9 +41,12 @@ def _pipeline(run, config: Config) -> Pipeline:
 
 
 def _tune(config: Config) -> Config:
-    """测试里不依赖外部 EPUBCheck，自检已经足够覆盖。"""
-    config.validate.require_epubcheck = False
-    config.validate.epubcheck_jar = str(Path(config.workdir) / "no-such-epubcheck.jar")
+    """测试里关掉 EPUBCheck：自检足够覆盖结构，而且不能让测试依赖机器上装没装。
+
+    显式关，而不是"指一个不存在的 jar 等它自己失败"——后者在开发机上会真的
+    找到 tools/ 下的 epubcheck，测试就变成了环境相关的。
+    """
+    config.validate.epubcheck_mode = "off"
     return config
 
 
@@ -123,10 +126,14 @@ def test_full_round_trip(tmp_path: Path):
     assert selflint.lint_epub(epub).passed
     assert run.counters["check"]["passed"] is True
 
-    # 没有 EPUBCheck 时必须留下告警，不能静默当成"完全校验过了"
+    # 收尾时必须有明确的"完成"信号
     codes = {a.code for a in AlertSink(run.alerts_path).load().items}
-    assert AlertCode.EPUBCHECK_UNAVAILABLE.value in codes
     assert AlertCode.OUTPUT_READY.value in codes
+
+    # 本测试显式关掉了 EPUBCheck，这一点要如实记在报告里
+    check = json.loads(run.check_json.read_text(encoding="utf-8"))
+    assert check["epubcheck_ran"] is False
+    assert "off" in check["epubcheck_reason"]
 
 
 def test_clean_book_skips_calibration(tmp_path: Path):
@@ -218,16 +225,68 @@ def test_accept_flag_delivers_with_loud_alert(tmp_path: Path):
     assert AlertCode.FORMAT_FAILED.value in codes
 
 
-def test_require_epubcheck_blocks_when_missing(tmp_path: Path):
+def test_epubcheck_require_mode_blocks_when_it_cannot_run(tmp_path: Path, monkeypatch):
+    """require 模式下没跑成 EPUBCheck 必须判失败，不能拿自检冒充完整校验。
+
+    这里直接让外部校验"没跑成"，而不是指着机器上装没装——否则开发机上
+    tools/ 里有 jar 时这条测试就失去意义了。
+    """
+    from pdf2epub import epubcheck as epubcheck_mod
+    from pdf2epub.issues import LintReport
+
     run, config = make_run(tmp_path, pages=2, clean=True)
     _tune(config)
-    config.validate.require_epubcheck = True
+    config.validate.epubcheck_mode = "require"
     _pipeline(run, config).run_all()
     _write_book(run)
 
-    result = _pipeline(run, config).run_all()
+    monkeypatch.setattr(
+        epubcheck_mod,
+        "run",
+        lambda *a, **k: LintReport(source="epubcheck", ran=False, error="模拟：找不到 epubcheck"),
+    )
+
+    result = _pipeline(run, config).run_all(PipelineOptions(force=("check",)))
     assert result.exit_code == 1
     assert run.stage(Stage.CHECK).status == StageStatus.FAILED.value
+
+
+def test_epubcheck_auto_mode_survives_missing_tool(tmp_path: Path, monkeypatch):
+    """auto 模式下跑不成 EPUBCheck 只是告警：自检的结论仍然算数。"""
+    from pdf2epub import epubcheck as epubcheck_mod
+    from pdf2epub.issues import LintReport
+
+    run, config = make_run(tmp_path, pages=2, clean=True)
+    _tune(config)
+    config.validate.epubcheck_mode = "auto"
+    _pipeline(run, config).run_all()
+    _write_book(run)
+
+    monkeypatch.setattr(
+        epubcheck_mod,
+        "run",
+        lambda *a, **k: LintReport(source="epubcheck", ran=False, error="模拟：找不到 epubcheck"),
+    )
+
+    result = _pipeline(run, config).run_all(PipelineOptions(force=("check",)))
+    assert result.exit_code == 2, result.summary()
+    assert run.counters["check"]["passed"] is True
+    codes = {a.code for a in AlertSink(run.alerts_path).load().items}
+    assert AlertCode.EPUBCHECK_UNAVAILABLE.value in codes
+
+
+def test_epubcheck_off_mode_never_runs_external_tool(tmp_path: Path):
+    """off 模式应当完全不碰外部工具，哪怕机器上就装着。"""
+    from pdf2epub import epubcheck as epubcheck_mod
+
+    run, config = make_run(tmp_path, pages=2, clean=True)
+    _tune(config)
+    assert not epubcheck_mod.discover(config.validate).available
+
+    config.validate.epubcheck_mode = "auto"
+    # 本机 tools/ 下有 jar 时应当能自动发现（没有也不影响这条断言的意义）
+    tool = epubcheck_mod.discover(config.validate)
+    assert tool.available or "未找到" in (tool.reason or "") or "下载" in (tool.reason or "")
 
 
 # ---------------------------------------------------------------------------

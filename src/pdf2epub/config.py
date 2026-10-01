@@ -1,8 +1,11 @@
-"""配置加载：内置默认值 < TOML 文件 < 环境变量。
+"""配置加载：内置默认值 < ``.env`` < TOML 文件 < 真实环境变量 < 显式覆盖。
 
 环境变量覆盖规则：``PDF2EPUB__SECTION__KEY``，例如
 ``PDF2EPUB__MINERU__MODEL_VERSION=vlm``、``PDF2EPUB__WORKDIR=d:/tmp/run``。
 值为字符串，会按目标字段的默认类型自动做 bool/int/float/list 转换。
+
+``.env``（当前工作目录下）专门用来放 Token 这类密钥，内容会被注入 ``os.environ``，
+因此 :meth:`MineruConfig.resolve_token` 也能直接读到。已有同名环境变量时不覆盖。
 """
 
 from __future__ import annotations
@@ -18,9 +21,50 @@ except ModuleNotFoundError:  # pragma: no cover
     import tomli as tomllib  # type: ignore[no-redef]
 
 from .errors import ConfigError
+from .logutil import get_logger
+
+log = get_logger("config")
 
 DEFAULT_CONFIG_NAME = "pdf2epub.toml"
+DEFAULT_ENV_NAME = ".env"
 ENV_PREFIX = "PDF2EPUB__"
+
+
+def load_env_file(path: Path | str | None = None, *, cwd: Path | None = None) -> Path | None:
+    """把 ``.env`` 里的键值对注入 ``os.environ``，返回实际加载的文件。
+
+    刻意不引入 python-dotenv：这个格式简单到不值得多一个依赖。
+
+    规则：
+    - **已有的真实环境变量优先**，``.env`` 只补空缺。这样临时
+      ``$env:MINERU_TOKEN=...`` 覆盖 ``.env`` 的行为符合直觉。
+    - 支持 ``KEY=VALUE``、``export KEY=VALUE``、``#`` 注释、单双引号包裹。
+    - 值**原样使用**，不做变量展开——secret 里出现 ``$`` 不该被吃掉。
+    """
+    base = Path(cwd) if cwd else Path.cwd()
+    target = Path(path) if path else base / DEFAULT_ENV_NAME
+    if not target.is_file():
+        return None
+
+    for number, raw in enumerate(target.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        key, separator, value = line.partition("=")
+        if not separator:
+            log.debug("%s 第 %d 行不是 KEY=VALUE，已跳过", target.name, number)
+            continue
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+    log.debug("已加载环境文件：%s", target)
+    return target
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +136,8 @@ class ValidateConfig:
     epubcheck_jar: str = ""
     java_cmd: str = "java"
     #: 没有 EPUBCheck 时是否直接失败。默认 False——自检已经能兜住大部分问题
-    require_epubcheck: bool = False
+    #: auto = 找得到就用；require = 必须跑，找不到就判失败；off = 完全不跑
+    epubcheck_mode: str = "auto"
     #: 达到该级别算"不合格"：FATAL / ERROR / WARNING
     fail_on_severity: str = "ERROR"
 
@@ -118,6 +163,8 @@ class Config:
 
     #: 配置文件来源路径，主要用于诊断
     source_path: str = ""
+    #: 实际加载的 .env 路径，主要用于诊断
+    env_path: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -175,13 +222,25 @@ def load_config(
 ) -> Config:
     """加载配置。
 
+    优先级（后者覆盖前者）：
+
+    内置默认值 < ``.env`` < ``pdf2epub.toml`` < 真实环境变量
+    （``PDF2EPUB__SECTION__KEY``）< ``overrides``
+
+    ``.env`` 只负责把 Token 之类的密钥填进环境，所以排在配置文件之前——
+    它补的是"空缺"，不该悄悄盖掉用户显式写下的配置。
+
     Args:
         path: 显式配置文件路径；为 None 时在 cwd 下查找 ``pdf2epub.toml``。
-        cwd: 查找起点，默认当前工作目录。
+        cwd: 查找起点，同时决定 ``.env`` 的位置，默认当前工作目录。
         overrides: 最高优先级的点分键覆盖，如 ``{"build.title": "X"}``。
     """
     cwd = Path(cwd or Path.cwd())
     config = Config()
+
+    # .env 里的值会注入 os.environ，于是下面的 _apply_env / resolve_token 都能看见；
+    # 真实环境变量已存在时不覆盖。
+    env_file = load_env_file(cwd=cwd)
 
     resolved: Path | None = None
     if path is not None:
@@ -202,6 +261,8 @@ def load_config(
             raise ConfigError(f"配置文件 TOML 语法错误：{resolved} -> {exc}") from exc
         config.source_path = str(resolved)
         _merge_into(config, data, "root")
+
+    config.env_path = str(env_file) if env_file else ""
 
     _apply_env(config)
     for dotted, value in (overrides or {}).items():
@@ -262,6 +323,8 @@ def _validate(config: Config) -> None:
         raise ConfigError("calibrate.render_dpi 必须为正数")
     if config.validate.fail_on_severity.upper() not in {"FATAL", "ERROR", "WARNING"}:
         raise ConfigError("validate.fail_on_severity 只能是 FATAL / ERROR / WARNING")
+    if config.validate.epubcheck_mode not in {"auto", "require", "off"}:
+        raise ConfigError("validate.epubcheck_mode 只能是 auto / require / off")
     if not config.language.strip():
         raise ConfigError("language 不能为空")
 

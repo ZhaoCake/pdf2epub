@@ -65,7 +65,7 @@ allow_empty_metadata = true    # 元数据不确定时允许留空，脚本不�
 # 校验：只报告，不修复。改文本是 LLM 的事。
 # ---------------------------------------------------------------------------
 [validate]
-epubcheck_jar = ""             # 留空则自动探测（环境变量 EPUBCHECK_JAR / PATH / 常见位置）
+epubcheck_mode = "auto"        # auto=有就用 / require=必须跑，没有就判失败 / off=完全不跑
+epubcheck_jar = ""             # 留空则自动探测（EPUBCHECK_JAR / PATH / tools/** 等常见位置）
 java_cmd = "java"
-require_epubcheck = false      # true 则找不到 EPUBCheck 直接判失败
 fail_on_severity = "ERROR"     # FATAL | ERROR | WARNING（WARNING 更严格）

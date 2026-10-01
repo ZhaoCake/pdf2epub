@@ -187,10 +187,24 @@ build/
 
 ## 配置
 
-内置默认值 < `pdf2epub.toml` < 环境变量（`PDF2EPUB__SECTION__KEY`，如
-`PDF2EPUB__CALIBRATE__SCORE_THRESHOLD=0.8`）。
+优先级（后者覆盖前者）：
 
-完整配置见仓库里的 [`pdf2epub.toml`](pdf2epub.toml)。常用的几个：
+```
+内置默认值 < .env < pdf2epub.toml < 真实环境变量 < 命令行覆盖
+```
+
+`.env` 放在当前工作目录（项目根），专门用来放密钥，**会被自动加载**：
+
+```ini
+MINERU_TOKEN=sk-...
+```
+
+它只补空缺：已经有同名环境变量时不覆盖，所以临时
+`$env:MINERU_TOKEN=...` 依然优先。值按字面使用，不做 `%TEMP%` 之类的变量展开。
+
+其余配置写在 `pdf2epub.toml`，也能用 `PDF2EPUB__SECTION__KEY` 形式的环境变量覆盖
+（如 `PDF2EPUB__CALIBRATE__SCORE_THRESHOLD=0.8`）。完整清单见仓库里的
+[`pdf2epub.toml`](pdf2epub.toml)，常用的几个：
 
 ```toml
 [mineru]
@@ -203,7 +217,7 @@ render_dpi = 140               # 页面图清晰度
 
 [validate]
 fail_on_severity = "ERROR"     # FATAL | ERROR | WARNING
-require_epubcheck = false      # true 则找不到 EPUBCheck 直接判失败
+epubcheck_mode = "auto"        # auto | require | off
 ```
 
 ---
@@ -211,11 +225,19 @@ require_epubcheck = false      # true 则找不到 EPUBCheck 直接判失败
 ## 环境要求
 
 - Python 3.10+
-- MinerU Token：<https://mineru.net/apiManage/token>
+- MinerU Token：<https://mineru.net/apiManage/token>，写进 `.env`
 - **页面渲染**（`pypdfium2` + `Pillow`）：装了才能做多模态校准；不装会退化成
   纯文本校准并告警
-- **EPUBCheck**（需要 Java）：<https://github.com/w3c/epubcheck/releases>，
-  用 `EPUBCHECK_JAR` 指定路径或放进 `PATH`。不装也能跑，自检会顶上并告警
+- **EPUBCheck**（需要 Java）：<https://github.com/w3c/epubcheck/releases>
+
+EPUBCheck 不需要配环境变量——解压到 `tools/` 下就会被自动发现：
+
+```
+tools/epubcheck-5.1.0/epubcheck.jar
+```
+
+也可以放别处用 `EPUBCHECK_JAR` 指路。没装也能跑，只剩自检这一道，并且会明确告警
+（`check.json` 里 `epubcheck_ran: false`），不会把"只跑了一道"说成"跑过了"。
 
 `pdf2epub doctor` 会把这几项逐条查一遍。
 

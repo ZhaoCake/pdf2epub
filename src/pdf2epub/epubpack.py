@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import datetime
 import json
+import time
 import uuid
 import zipfile
 from dataclasses import dataclass, field
@@ -413,16 +415,41 @@ class PackResult:
         }
 
 
+def _content_modified(oebps: Path, generated: set[str]) -> str:
+    """由**内容文件**的最后修改时间推出 ``dcterms:modified``。
+
+    不能用 ``now()``：那样同样的内容两次打包会产出不同的字节，产物既没法比对
+    也没法复现。用内容的 mtime 既贴合这个字段的语义（"这份出版物最后一次改动
+    是什么时候"），又让打包变成幂等的。
+
+    ``generated`` 里的文件是打包器自己生成的（OPF / nav / 自动封面），
+    每次打包都会重写，必须排除，否则 mtime 永远等于"刚刚"。
+    """
+    newest = 0.0
+    for path in oebps.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.relative_to(oebps).as_posix() in generated:
+            continue
+        try:
+            newest = max(newest, path.stat().st_mtime)
+        except OSError:  # pragma: no cover - 并发删除等
+            continue
+    stamp = newest or time.time()
+    return datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def build_package(build_dir: Path, *, identifier_seed: str = "") -> PackResult:
     """扫描 ``build/``，生成 OPF/nav/container，压成 EPUB。"""
-    import datetime
-
     build_dir = Path(build_dir)
     oebps = build_dir / "OEBPS"
     if not oebps.is_dir():
         raise BuildError(f"构建目录不完整，缺少 {oebps}")
 
     book = load_book(build_dir, fallback_identifier=identifier_seed)
+
+    #: 由本函数生成、不算"内容"的文件，算 dcterms:modified 时要跳过
+    generated: set[str] = set()
 
     # 封面页：只声明了封面图、而且没有人手写封面页时才生成
     if book.cover:
@@ -434,6 +461,7 @@ def build_package(build_dir: Path, *, identifier_seed: str = "") -> PackResult:
             cover_href = "text/cover.xhtml"
             if not (oebps / cover_href).is_file():
                 (oebps / cover_href).write_text(_cover_page(book), encoding="utf-8")
+                generated.add(cover_href)
 
     items = _walk(oebps)
     if not items:
@@ -458,8 +486,9 @@ def build_package(build_dir: Path, *, identifier_seed: str = "") -> PackResult:
     (oebps / nav_href).write_text(
         _nav_xhtml(book, _tic_toc(book, spine), spine, cover_href), encoding="utf-8"
     )
+    generated.update({nav_href, "content.opf"})
 
-    modified = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    modified = _content_modified(oebps, generated)
     (oebps / "content.opf").write_text(_opf(book, items + [nav_item], spine, modified), encoding="utf-8")
 
     meta_inf = build_dir / "META-INF"
