@@ -14,6 +14,7 @@ venv/
 .pdf2epub/
 *.epub
 !tests/fixtures/*.epub
+oldtry/
 
 # 密钥
 .env

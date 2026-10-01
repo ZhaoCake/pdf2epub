@@ -24,6 +24,10 @@ MinerU 解析得不错，但总有些段落它自己也没把握（形近字、�
 
 脚本只做搬运、截图、打包、报告。**判断和转写全部交给 LLM。**
 
+> 要真正跑一轮、或者你就是那个被停下来干活的 Agent，
+> 看 [`docs/agent-guide.md`](docs/agent-guide.md)：三个关卡上具体该怎么干，
+> 以及已经踩过的坑。
+
 ---
 
 ## 使用
@@ -229,6 +233,9 @@ epubcheck_mode = "auto"        # auto | require | off
 - **页面渲染**（`pypdfium2` + `Pillow`）：装了才能做多模态校准；不装会退化成
   纯文本校准并告警
 - **EPUBCheck**（需要 Java）：<https://github.com/w3c/epubcheck/releases>
+- **`latex2mathml`**（可选，撰写阶段用）：`pip install latex2mathml`。
+  只有在用 [`scripts/compose_mathml.py`](scripts/compose_mathml.py) 把公式转
+  MathML 时才需要，流水线本身不依赖它
 
 EPUBCheck 不需要配环境变量——解压到 `tools/` 下就会被自动发现：
 
@@ -256,7 +263,7 @@ pytest
 
 ```
 src/pdf2epub/
-├── cli.py           命令行（6 个命令）
+├── cli.py           命令行
 ├── pipeline.py      四阶段调度与"谁来干活"的边界
 ├── mineru_client.py MinerU 官方 API 客户端
 ├── ingest.py        PDF 剖析与超限切分
@@ -270,4 +277,14 @@ src/pdf2epub/
 ├── epubcheck.py     外部 EPUBCheck 调用
 ├── runstate.py      运行状态与断点续跑
 └── alerts.py        告警出口
+
+scripts/
+└── compose_mathml.py  示例：把 source.md 写成章节（公式转 MathML）
+
+docs/
+└── agent-guide.md     三个关卡上具体怎么干活 + 踩过的坑
 ```
+
+`scripts/` 里的东西**不是流水线的一部分**，是顺手工具。流水线坚持"撰写是 LLM
+的活"，所以那里没有 Markdown→XHTML 转换器；但把机械部分固化下来能省掉每次手敲
+几万字，也避免重新踩 `\binom` 那个坑。
