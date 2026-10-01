@@ -163,6 +163,32 @@ def test_other_identifier_schemes_are_kept(tmp_path: Path):
     assert epubpack.load_book(build).identifier == "https://example.com/books/1"
 
 
+def test_mathml_is_declared_in_manifest(tmp_path: Path):
+    """EPUB 3 要求用了 MathML 就在 manifest 里声明，否则 EPUBCheck 报 OPF-014。"""
+    build = _tree(tmp_path, chapters=2)
+    text_dir = build / "OEBPS" / "text"
+    (text_dir / "ch001.xhtml").write_text(
+        '<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
+        '<html xmlns="http://www.w3.org/1999/xhtml"><head><title>含公式</title></head><body>'
+        '<p><math xmlns="http://www.w3.org/1998/Math/MathML"><mi>x</mi></math></p>'
+        "</body></html>",
+        encoding="utf-8",
+    )
+    epubpack.build_package(build)
+
+    with zipfile.ZipFile(epubpack.pack(build, tmp_path / "out.epub")) as archive:
+        opf = archive.read("OEBPS/content.opf").decode("utf-8")
+    assert opf.count('properties="mathml"') == 1
+
+
+def test_plain_chapters_get_no_mathml_property(tmp_path: Path):
+    build = _tree(tmp_path, chapters=1)
+    epubpack.build_package(build)
+    with zipfile.ZipFile(epubpack.pack(build, tmp_path / "out.epub")) as archive:
+        opf = archive.read("OEBPS/content.opf").decode("utf-8")
+    assert "mathml" not in opf
+
+
 def test_cover_page_generated_when_declared(tmp_path: Path):
     build = _tree(tmp_path, book={"cover": "images/cover.png"})
     (build / "OEBPS" / "images").mkdir(parents=True, exist_ok=True)

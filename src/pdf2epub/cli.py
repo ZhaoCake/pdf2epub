@@ -33,7 +33,7 @@ from .config import DEFAULT_CONFIG_NAME, DEFAULT_ENV_NAME, Config, load_config
 from .errors import ConfigError, Pdf2EpubError
 from .logutil import get_logger, reset_logging, set_context, setup_logging
 from .pipeline import Pipeline, PipelineOptions
-from .runstate import Run, RunStore, Stage, read_json
+from .runstate import Run, RunStore, Stage, StageStatus, read_json
 
 EXIT_OK = 0
 EXIT_FATAL = 1
@@ -162,12 +162,17 @@ def _print_run(printer: Printer, run: Run, alerts: AlertSink) -> None:
 
 
 def _print_next_steps(printer: Printer, run: Run, config: Config) -> None:
-    """流水线停下来了，告诉调用者下一步干什么。"""
-    calibrate = run.stage(Stage.CALIBRATE)
-    compose = run.stage(Stage.COMPOSE)
-    check = run.stage(Stage.CHECK)
+    """流水线停下来了，告诉调用者下一步干什么。
 
-    if calibrate.status == "blocked":
+    只报**第一个**暂停的阶段：后面的阶段可能还留着上一轮的 blocked 状态，
+    全打印出来会让调用者以为要同时做两件事。
+    """
+    pending = next(
+        (stage for stage in Stage.ordered() if run.stage(stage).status == StageStatus.BLOCKED.value),
+        None,
+    )
+
+    if pending is Stage.CALIBRATE:
         printer.section("轮到你了：校准")
         printer.out(f"  工单：    {run.calibrate_report}")
         printer.out(f"  要改的：  {run.calibrate_source}")
@@ -178,7 +183,7 @@ def _print_next_steps(printer: Printer, run: Run, config: Config) -> None:
         printer.out("  确认不需要改的话：")
         printer.out(f"      pdf2epub done calibrate --note \"无需校准\" --run {run.run_id}")
 
-    if compose.status == "blocked":
+    elif pending is Stage.COMPOSE:
         printer.section("轮到你了：撰写")
         printer.out(f"  说明书：  {run.build_dir / 'BRIEF.md'}")
         printer.out(f"  要写的：  {run.book_json}")
@@ -187,7 +192,7 @@ def _print_next_steps(printer: Printer, run: Run, config: Config) -> None:
         printer.out("  写完执行：")
         printer.out(f"      pdf2epub run --run {run.run_id}")
 
-    if check.status == "blocked":
+    elif pending is Stage.CHECK:
         printer.section("轮到你了：改格式")
         printer.out(f"  报告：    {run.check_report}")
         printer.out(f"  要改的：  {run.build_dir}")

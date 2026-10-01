@@ -130,6 +130,55 @@ def markdown_text(pages: int, *, low: tuple[int, ...] = (0,), clean: bool = Fals
     return "\n".join(blocks)
 
 
+def vlm_bundle(root: Path, *, pages: int = 3) -> Path:
+    """复刻 MinerU vlm 模式的真实形状，用来锁住两个坑：
+
+    - ``model.json`` 是 **list of list**（每页直接是 det 列表，没有 page_info 外壳）
+    - ``content_list`` 的 bbox 是 **0-1000** 整数归一化，而 model.json 是 **0-1**
+    - 版面层带分数的是 ``ocr_text``，粒度是**逐行**；正文条目是**整段**
+    """
+    root.mkdir(parents=True, exist_ok=True)
+
+    model = []
+    content = []
+    for page_idx in range(pages):
+        lines = [
+            # 逐行 OCR：第一行没把握，其余正常
+            {"type": "ocr_text", "bbox": [0.10, 0.20, 0.90, 0.24], "text": "第一行的识别结果", "score": 0.42},
+            {"type": "ocr_text", "bbox": [0.10, 0.24, 0.90, 0.28], "text": "第二行的识别结果", "score": 1.0},
+            {"type": "ocr_text", "bbox": [0.10, 0.28, 0.90, 0.32], "text": "第三行的识别结果", "score": 1.0},
+            # 页内的公式：不带分数，只用来验证小框能落进行框
+            # （放在第一行——那行分数最低——才能验证它继承的是所在行的分数）
+            {"type": "inline_formula", "bbox": [0.30, 0.21, 0.40, 0.23], "content": None},
+            {"type": "page_number", "bbox": [0.49, 0.94, 0.51, 0.96], "content": None},
+        ]
+        model.append(lines)
+
+        # content_list：整段 + 每页一个公式，坐标是 0-1000
+        content.append(
+            {
+                "type": "text",
+                "text": f"第 {page_idx + 1} 页的整段正文，由三行 OCR 拼成。",
+                "bbox": [100, 200, 900, 320],
+                "page_idx": page_idx,
+            }
+        )
+        content.append(
+            {
+                "type": "equation",
+                "text": f"$$E_{page_idx + 1} = mc^2$$",
+                "bbox": [300, 210, 400, 230],
+                "page_idx": page_idx,
+            }
+        )
+
+    (root / "abc123_model.json").write_text(json.dumps(model, ensure_ascii=False), encoding="utf-8")
+    (root / "abc123_content_list.json").write_text(json.dumps(content, ensure_ascii=False), encoding="utf-8")
+    (root / "full.md").write_text("# 正文\n", encoding="utf-8")
+    (root / ".extracted").write_text("ok", encoding="utf-8")
+    return root
+
+
 def write_bundle(root: Path, *, pages: int = 4, low: tuple[int, ...] = (0,), clean: bool = False) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "book_model.json").write_text(

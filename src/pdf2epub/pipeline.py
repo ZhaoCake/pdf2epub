@@ -132,6 +132,14 @@ class Pipeline:
         record.finished_at = None
         record.error = None
         record.note = ""
+
+        # 重跑某个阶段意味着它后面的结果都不再有效。不重置的话，上一轮留下的
+        # "blocked" 会一直挂在那里，CLI 会同时报出好几个"轮到你"。
+        for later in Stage.ordered()[Stage.ordered().index(stage) + 1 :]:
+            stale = self.run.stage(later)
+            if stale.status != StageStatus.PENDING.value:
+                stale.reset()
+
         self.run.save()
         set_context(stage=stage.value)
 

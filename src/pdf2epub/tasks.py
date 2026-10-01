@@ -101,6 +101,33 @@ class Task:
 # ---------------------------------------------------------------------------
 
 
+def _bundle_offsets(run: Run, bundles: list[Bundle]) -> list[tuple[Bundle, int]]:
+    """给每个产物配上它在整本书里的起始页码。
+
+    多 chunk 时 MinerU 的页码是**局部**的，不加上偏移，第 2 个 chunk 的低分段
+    会被标成第 1 页，渲染出来的页面图就全对不上了。
+    """
+    chunks = run.counters.get("chunks") or []
+    starts = {str(c.get("chunk_id")): int(c.get("page_start") or 0) for c in chunks}
+    return [(bundle, starts.get(bundle.root.name, 0)) for bundle in bundles]
+
+
+def _page_sizes(run: Run, bundle: Bundle) -> dict[int, tuple[float, float]]:
+    """局部页码 -> (宽, 高)，用于把像素 bbox 归一到 0-1。
+
+    尺寸取自 prepare 阶段剖析到的 PDF 页面大小。文档里混排不同尺寸的页面时
+    会有偏差，但那只影响"分数能不能贴上"，不影响正文本身。
+    """
+    profile = run.counters.get("pdf") or {}
+    width = float(profile.get("width") or 0)
+    height = float(profile.get("height") or 0)
+    if width <= 1 or height <= 1:
+        return {}
+    chunk = next((c for c in (run.counters.get("chunks") or []) if c.get("chunk_id") == bundle.root.name), None)
+    pages = int((chunk or {}).get("page_count") or profile.get("page_count") or 0)
+    return {index: (width, height) for index in range(max(pages, 0))}
+
+
 def scaffold_calibration(
     run: Run,
     bundles: list[Bundle],
@@ -124,10 +151,16 @@ def scaffold_calibration(
 
     # 2) 抽低分段
     segments: list[Segment] = []
-    for bundle in bundles:
-        from .segments import extract_segments
+    from .segments import extract_segments
 
-        segments.extend(extract_segments(bundle))
+    for bundle, offset in _bundle_offsets(run, bundles):
+        segments.extend(
+            extract_segments(
+                bundle,
+                page_sizes=_page_sizes(run, bundle),
+                page_offset=offset,
+            )
+        )
     low = low_confidence(segments, threshold=config.score_threshold, limit=config.max_segments)
 
     atomic_write_json(

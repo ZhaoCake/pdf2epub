@@ -99,6 +99,20 @@ class StageRecord:
             return None
         return round(self.finished_at - self.started_at, 3)
 
+    def reset(self) -> None:
+        """退回未执行状态。
+
+        重跑前面的阶段时，后面阶段的结果就不作数了；留着旧的 blocked/done
+        会让人误以为还有别的活在等着。``attempts`` 保留，那是历史。
+        """
+        self.status = StageStatus.PENDING.value
+        self.started_at = None
+        self.finished_at = None
+        self.input_hash = ""
+        self.outputs = []
+        self.error = None
+        self.note = ""
+
     def to_dict(self) -> dict[str, Any]:
         data = {
             "status": self.status,

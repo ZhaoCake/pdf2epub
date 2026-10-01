@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import time
 import uuid
 import zipfile
@@ -26,6 +27,8 @@ from .runstate import remove_tree
 log = get_logger("epubpack")
 
 MIMETYPE = "application/epub+zip"
+#: 文档里出现它就说明用了 MathML，manifest 必须声明 properties="mathml"
+MATHML_NS = "http://www.w3.org/1998/Math/MathML"
 CONTAINER_XML = """\
 <?xml version="1.0" encoding="UTF-8"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -212,8 +215,32 @@ def _walk(oebps: Path) -> list[ManifestItem]:
             log.warning("跳过无法识别类型的文件：%s", relative)
             continue
         base = path.stem if path.parent == oebps else f"{path.parent.relative_to(oebps).as_posix().replace('/', '-')}-{path.stem}"
-        items.append(ManifestItem(item_id=unique_id(base), href=relative, media_type=media))
+        items.append(
+            ManifestItem(
+                item_id=unique_id(base),
+                href=relative,
+                media_type=media,
+                properties=_detect_properties(path, media),
+            )
+        )
     return items
+
+
+def _detect_properties(path: Path, media_type: str) -> str:
+    """认出需要写进 manifest 的 properties。
+
+    EPUB 3 规定：文档里用了 MathML 就得声明 ``mathml``，否则 EPUBCheck 报 OPF-014。
+    这是纯机械的探测，不该指望作者记得手写。
+    """
+    if media_type != "application/xhtml+xml":
+        return ""
+    try:
+        head = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:  # pragma: no cover
+        return ""
+    if MATHML_NS in head or re.search(r"<math[\s>]", head):
+        return "mathml"
+    return ""
 
 
 def _spine_order(book: BookSpec, items: list[ManifestItem]) -> list[ManifestItem]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from conftest import write_bundle
+from conftest import vlm_bundle, write_bundle
 
 from pdf2epub.bundle import load_bundle
 from pdf2epub.segments import (
@@ -82,6 +82,69 @@ def test_generic_fallback_on_unknown_schema(tmp_path: Path):
     hit = next(s for s in segments if "没把握" in s.text)
     assert hit.score == 0.31
     assert hit.page_no == 5
+
+
+class TestVlmBundle:
+    """MinerU vlm 模式的真实形状。这组曾经全是 bug，值得单独锁住。"""
+
+    def _segments(self, tmp_path, *, pages=3, sizes=True):
+        root = vlm_bundle(tmp_path / "vlm", pages=pages)
+        return extract_segments(
+            load_bundle(root),
+            page_sizes={i: (595.28, 841.89) for i in range(pages)} if sizes else None,
+        )
+
+    def test_pages_are_not_all_page_one(self, tmp_path):
+        """model.json 是"列表套列表"，页码必须按顶层下标推，不能全落在 0。"""
+        segments = self._segments(tmp_path, pages=4)
+        assert {s.page_idx for s in segments} == {0, 1, 2, 3}
+
+    def test_zero_to_thousand_coords_are_understood(self, tmp_path):
+        """content_list 的 0-1000 坐标要和 model.json 的 0-1 坐标对齐。"""
+        segments = self._segments(tmp_path)
+        scored = [s for s in segments if s.score is not None]
+        assert len(scored) == len(segments), [s.text for s in segments if s.score is None]
+
+    def test_paragraph_score_is_the_worst_line(self, tmp_path):
+        """整段由多行拼成时，取最低的那一行——整段里有一处没把握就值得看一眼。"""
+        segments = self._segments(tmp_path)
+        body = next(s for s in segments if s.kind == "text")
+        assert body.score == 0.42, body.score
+        assert body.lines == 3
+
+    def test_small_formula_box_matches_enclosing_line(self, tmp_path):
+        """公式是小框，落在某一行里，也该拿到那一行的分数。"""
+        segments = self._segments(tmp_path)
+        formula = next(s for s in segments if s.kind == "equation")
+        assert formula.score == 0.42, formula.score
+
+    def test_low_segments_spread_across_pages(self, tmp_path):
+        """低分段必须散在各自的页上——这正是当初出错的症结。"""
+        segments = self._segments(tmp_path, pages=5)
+        low = low_confidence(segments, threshold=0.75, limit=100)
+        assert {s.page_no for s in low} == {1, 2, 3, 4, 5}
+
+    def test_without_page_sizes_coordinates_still_align(self, tmp_path):
+        """两边都是 0-1000 时（夹具那种），没有页面尺寸也能对齐。"""
+        segments = self._segments(tmp_path, sizes=False)
+        assert all(s.score is not None for s in segments)
+
+
+def test_wrong_scale_is_refused_not_guessed(tmp_path):
+    """认不出坐标系时宁可没有分数，也不要拿错框硬配。"""
+    root = tmp_path / "odd"
+    root.mkdir()
+    (root / "x_model.json").write_text(
+        json.dumps([[[{"type": "ocr_text", "bbox": [3000, 4000, 5000, 4200], "score": 0.3, "text": "行"}]]]),
+        encoding="utf-8",
+    )
+    (root / "x_content_list.json").write_text(
+        json.dumps([{"type": "text", "text": "段落", "bbox": [1, 2, 3, 4], "page_idx": 0}]),
+        encoding="utf-8",
+    )
+    segments = extract_segments(load_bundle(root))
+    assert len(segments) == 1
+    assert segments[0].score is None, "坐标系对不上就不该给分数"
 
 
 def test_normalize_score_ranges():

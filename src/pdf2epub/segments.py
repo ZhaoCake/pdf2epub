@@ -12,9 +12,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 from .bundle import Bundle, read_json
 from .logutil import get_logger
@@ -43,6 +43,8 @@ class Segment:
     score_source: str
     bbox: tuple[float, float, float, float] | None = None
     order: int = 0
+    #: 分数是从多少个版面框（通常是 OCR 行）汇总来的；0 表示没配上
+    lines: int = 0
 
     @property
     def critical(self) -> bool:
@@ -56,6 +58,7 @@ class Segment:
             "kind": self.kind,
             "score": self.score,
             "score_source": self.score_source,
+            "lines": self.lines,
             "text": self.text,
             "bbox": list(self.bbox) if self.bbox else None,
         }
@@ -148,6 +151,74 @@ def _bbox_of(node: Any) -> tuple[float, float, float, float] | None:
     return None
 
 
+#: 0-1 归一化值不会超过这个数
+_UNIT_MAX = 1.5
+#: MinerU 常用 0-1000 的整数归一化坐标（content_list 就是这么给的）
+_SCALE_MAX = 1000.0
+#: 归一化之后允许略微出框（文字压到页边或溢出版心都是常事）
+_SCALE_SLACK = 1.05
+
+Box = tuple[float, float, float, float]
+Converter = Callable[[Box], Box]
+
+
+def _converter(
+    boxes: Iterable[Box | None],
+    size: tuple[float, float] | None,
+) -> Converter | None:
+    """给一组框挑一个"映射到 0-1"的换算方式。
+
+    MinerU 的 bbox 有三套写法，**两套坐标必须按同一套规则处理**，
+    否则 IoU 会静默归零——比报错难查得多：
+
+    - 0-1 归一化：``model.json``（vlm 模式）给的就是这个
+    - 0-1000 归一化：``content_list`` 给的是这个
+    - 真实像素：需要页面尺寸才能换算
+
+    实测同一份产物里，``content_list`` 的 ``[292,135,702,185]`` 除以 1000
+    正好等于 ``model.json`` 的 ``[0.294,0.136,0.703,0.186]``。
+
+    判定必须**整份文档一起做**，不能一页一页判：某页恰好只放了一小块内容时，
+    按页判断会把这一页误判成 0-1 坐标，于是只有这一页配不上分数，
+    比全错更难发现。
+
+    返回 None 表示认不出来——那就别配了。配错分数比没有分数更糟。
+    """
+    values = [box for box in boxes if box is not None]
+    if not values:
+        return None
+
+    top = max(max(box) for box in values)
+    if top <= _UNIT_MAX:
+        return lambda box: box
+
+    if size and size[0] > 1 and size[1] > 1:
+        width, height = size
+
+        def by_size(box: Box) -> Box:
+            return (box[0] / width, box[1] / height, box[2] / width, box[3] / height)
+
+        if max(max(by_size(box)) for box in values) <= _SCALE_SLACK:
+            return by_size
+
+    if top <= _SCALE_MAX:
+        return lambda box: (
+            box[0] / _SCALE_MAX,
+            box[1] / _SCALE_MAX,
+            box[2] / _SCALE_MAX,
+            box[3] / _SCALE_MAX,
+        )
+
+    return None
+
+
+def _representative_size(sizes: dict[int, tuple[float, float]] | None) -> tuple[float, float] | None:
+    """页面尺寸通常整本一致，取一个代表值就够。"""
+    if not sizes:
+        return None
+    return next(iter(sizes.values()))
+
+
 def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, float]) -> float:
     ix0, iy0 = max(a[0], b[0]), max(a[1], b[1])
     ix1, iy1 = min(a[2], b[2]), min(a[3], b[3])
@@ -211,32 +282,52 @@ def _page_of(node: Any, fallback: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-def extract_segments(bundle: Bundle) -> list[Segment]:
+def extract_segments(
+    bundle: Bundle,
+    *,
+    page_sizes: dict[int, tuple[float, float]] | None = None,
+    page_offset: int = 0,
+) -> list[Segment]:
     """从产物里抽出所有可用的带分段落。
 
-    优先用 ``content_list``：它是按阅读顺序排好的正文。但如果它身上一个分数都
-    带不出来（旧版本常见），就退回去在其它 JSON 里递归捞。
+    骨架一律用 ``content_list``：它是**最终正文**，页码、文本、阅读顺序都对。
+    分数几乎总是躺在 ``model.json`` 的版面框里，所以做法是拿版面框按 IoU 把分数
+    贴回正文条目。
+
+    直接去 ``model.json`` 里捞"带分数的节点"是错的——那些是版面中间产物
+    （``content`` 经常是 null，类型是 inline_formula/ocr_text 之类），
+    LLM 拿着它们没法对着正文改。
+
+    Args:
+        page_sizes: 局部页码 -> (宽, 高)，用于把像素 bbox 归一到 0-1。
+        page_offset: 该 chunk 在整本书里的起始页码（多 chunk 时用）。
     """
-    content = _from_content_list(bundle) if bundle.content_list is not None else []
-    if content and any(segment.score is not None for segment in content):
-        return content
+    if bundle.content_list is not None:
+        segments = _from_content_list(bundle, page_sizes=page_sizes, page_offset=page_offset)
+        if segments:
+            without = sum(1 for s in segments if s.score is None)
+            if without == len(segments):
+                log.info("正文全部没有置信度可用，交给 LLM 全量处理")
+            elif without:
+                log.info("%d/%d 条正文没配上置信度，其余按分数筛选", without, len(segments))
+            return segments
 
     for path in bundle.json_sources:
-        if path == bundle.content_list:
-            continue
-        found = _from_generic(read_json(path), source=path.name)
+        found = _from_generic(read_json(path), source=path.name, page_offset=page_offset)
         if found:
+            log.info("没有 content_list，退回从 %s 里直接捞带分数的节点", path.name)
             return found
-
-    if content:
-        log.info("产物不带置信度，只有正文；交给 LLM 按需处理")
-        return content
 
     log.info("产物里找不到任何带置信度的段落，交给 LLM 全量处理")
     return []
 
 
-def _from_content_list(bundle: Bundle) -> list[Segment]:
+def _from_content_list(
+    bundle: Bundle,
+    *,
+    page_sizes: dict[int, tuple[float, float]] | None = None,
+    page_offset: int = 0,
+) -> list[Segment]:
     payload = read_json(bundle.content_list)
     if not isinstance(payload, list):
         return []
@@ -246,18 +337,22 @@ def _from_content_list(bundle: Bundle) -> list[Segment]:
         return []
 
     # 分数可能直接写在 content_list 里，也可能要靠 model.json 的版面框配对
-    layout = _layout_index(bundle)
+    sizes = page_sizes or {}
+    layout = _layout_index(bundle, page_sizes=sizes)
+    convert = _converter((_bbox_of(item) for item in items), _representative_size(sizes))
     segments: list[Segment] = []
 
     for order, item in enumerate(items):
         score, source = find_score(item, depth=1)
         bbox = _bbox_of(item)
-        page_idx = _page_of(item, 0)
-        if score is None and layout:
-            score, source = _lookup_layout_score(layout, page_idx, bbox)
+        local_page = _page_of(item, 0)
+        lines = 0
+        if score is None and layout and convert is not None and bbox is not None:
+            score, source, lines = _lookup_layout_score(layout, local_page, convert(bbox))
         text = _text_of(item)
         if not text:
             continue
+        page_idx = local_page + page_offset
         segments.append(
             Segment(
                 segment_id=f"S{len(segments) + 1:05d}",
@@ -269,46 +364,128 @@ def _from_content_list(bundle: Bundle) -> list[Segment]:
                 score_source=source or "none",
                 bbox=bbox,
                 order=order,
+                lines=lines,
             )
         )
     return segments
 
 
-def _layout_index(bundle: Bundle) -> dict[int, list[tuple[tuple[float, float, float, float], float, str]]]:
-    """从 model.json / middle 里建 (页 -> [(框, 分数)]) 的索引。"""
-    index: dict[int, list[tuple[tuple[float, float, float, float], float, str]]] = {}
+@dataclass
+class LayoutPage:
+    """一页的版面框（已归一到 0-1）。"""
+
+    boxes: list[tuple[Box, float, str]] = field(default_factory=list)
+
+
+def _layout_index(
+    bundle: Bundle,
+    *,
+    page_sizes: dict[int, tuple[float, float]] | None = None,
+) -> dict[int, LayoutPage]:
+    """从 model.json / middle 里建 (局部页码 -> LayoutPage) 的索引。"""
+    size = _representative_size(page_sizes)
+
     for path in (bundle.model, bundle.middle):
+        if path is None:
+            continue
         payload = read_json(path)
         if payload is None:
             continue
+
+        pages: dict[int, list[Any]] = {}
+        every_box: list[Box | None] = []
         for page_idx, page_node in _iter_pages(payload):
-            for child in _iter_children(page_node):
+            children = list(_iter_children(page_node))
+            pages[page_idx] = children
+            every_box.extend(_bbox_of(child) for child in children)
+
+        convert = _converter(every_box, size)
+        if convert is None:
+            if any(every_box):
+                log.warning(
+                    "版面框的坐标系认不出来（既不是 0-1、也不是 0-1000，又缺页面尺寸）；"
+                    "置信度无法贴回正文，校准会退化成无分数"
+                )
+            continue
+
+        index: dict[int, LayoutPage] = {}
+        for page_idx, children in pages.items():
+            page = LayoutPage()
+            for child in children:
                 bbox = _bbox_of(child)
                 score, source = find_score(child, depth=1)
                 if bbox is None or score is None:
                     continue
-                index.setdefault(page_idx, []).append((bbox, score, source))
-    return index
+                page.boxes.append((convert(bbox), score, source))
+            index[page_idx] = page
+        if any(page.boxes for page in index.values()):
+            return index
+    return {}
+
+
+#: 两个框至少要有一半叠在一起才算"同一处内容"
+_OVERLAP_MIN = 0.5
+
+
+def _area(box: Box) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _intersection(a: Box, b: Box) -> float:
+    x0, y0 = max(a[0], b[0]), max(a[1], b[1])
+    x1, y1 = min(a[2], b[2]), min(a[3], b[3])
+    if x1 <= x0 or y1 <= y0:
+        return 0.0
+    return (x1 - x0) * (y1 - y0)
 
 
 def _lookup_layout_score(
-    index: dict[int, list[tuple[tuple[float, float, float, float], float, str]]],
+    index: dict[int, LayoutPage],
     page_idx: int,
-    bbox: tuple[float, float, float, float] | None,
-) -> tuple[float | None, str]:
-    if bbox is None:
-        return None, ""
-    entries = index.get(page_idx) or index.get(page_idx + 1)
-    if not entries:
-        return None, ""
-    best = max(entries, key=lambda entry: _iou(entry[0], bbox))
-    if _iou(best[0], bbox) < 0.2:
-        return None, ""
-    return best[1], f"layout:{best[2]}"
+    bbox_unit: Box | None,
+) -> tuple[float | None, str, int]:
+    """把版面框的分数贴到正文条目上（两边都已归一到 0-1）。
+
+    不能只比 IoU：版面层带分数的是 ``ocr_text`` ——**逐行**的结果，
+    而 ``content_list`` 的条目是**整段**。逐行框和整段框的 IoU 很低，
+    只比 IoU 会让"一整段正文 + 里面的公式"全都配不上分数，
+    而那恰恰是最需要复核的部分。
+
+    改用**重叠比例**：只要有一半叠在一起就算命中。逐行框会自然落进整段框里，
+    公式这种小框也会落进它所在的那一行里。
+
+    一段命中多行时取**最低**分——整段里只要有一处没把握，这一段就值得看一眼。
+    """
+    if bbox_unit is None:
+        return None, "", 0
+    page = index.get(page_idx) or index.get(page_idx + 1)
+    if page is None or not page.boxes:
+        return None, "", 0
+
+    target_area = _area(bbox_unit)
+    hits: list[tuple[float, str]] = []
+    for box, score, source in page.boxes:
+        overlap = _intersection(box, bbox_unit)
+        if overlap <= 0:
+            continue
+        into_target = overlap / target_area if target_area > 0 else 0.0
+        into_box = overlap / max(_area(box), 1e-9)
+        if into_target >= _OVERLAP_MIN or into_box >= _OVERLAP_MIN:
+            hits.append((score, source))
+
+    if not hits:
+        return None, "", 0
+    worst_score, worst_source = min(hits, key=lambda hit: hit[0])
+    return worst_score, f"layout:{worst_source}", len(hits)
 
 
-def _from_generic(payload: Any, *, source: str) -> list[Segment]:
-    """兜底：递归找"既有分数又有文本"的节点。"""
+def _from_generic(payload: Any, *, source: str, page_offset: int = 0) -> list[Segment]:
+    """兜底：递归找"既有分数又有文本"的节点。
+
+    只在没有 ``content_list`` 时才走这条路。页码靠 :func:`_iter_pages` 从
+    顶层结构推出来——直接从根节点递归下去的话，``[[页1的 det...], [页2的...]]``
+    这种"列表套列表"的形状会让所有节点的页码都停在 0。
+    """
     segments: list[Segment] = []
 
     def walk(node: Any, page_idx: int) -> None:
@@ -327,11 +504,12 @@ def _from_generic(payload: Any, *, source: str) -> list[Segment]:
             text = " ".join(t for t in (_text_of(c) for c in _flatten_dicts(node)) if t).strip()
 
         if score is not None and text:
+            page_idx = here + page_offset
             segments.append(
                 Segment(
                     segment_id=f"S{len(segments) + 1:05d}",
-                    page_idx=here,
-                    page_no=here + 1,
+                    page_idx=page_idx,
+                    page_no=page_idx + 1,
                     kind=_kind_of(node),
                     text=text,
                     score=score,
@@ -345,7 +523,8 @@ def _from_generic(payload: Any, *, source: str) -> list[Segment]:
             if isinstance(value, (list, dict)):
                 walk(value, here)
 
-    walk(payload, 0)
+    for page_idx, page_node in _iter_pages(payload):
+        walk(page_node, page_idx)
     return segments
 
 
@@ -377,6 +556,11 @@ def _iter_pages(payload: Any) -> Iterable[tuple[int, Any]]:
 
 
 def _iter_children(page_node: Any) -> Iterable[Any]:
+    if isinstance(page_node, list):
+        # 有的 schema（MinerU vlm 的 model.json）里，"页"直接就是 det 的列表，
+        # 没有 page_info 外壳——这里不认列表的话，版面索引会整片为空。
+        yield from page_node
+        return
     if not isinstance(page_node, dict):
         return
     for key in PAGE_CONTAINER_KEYS:
