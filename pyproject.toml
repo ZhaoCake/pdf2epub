@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdf2epub"
+version = "0.2.0"
+description = "PDF -> EPUB：MinerU 负责解析，LLM 负责判断与转写，脚本负责搬运、打包与校验"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "requests>=2.31",
+    "lxml>=5.0",
+    "Pillow>=10.0",
+    "pypdf>=4.0",
+    "tomli>=2.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+# 页面渲染：校准阶段要把 PDF 页转成图片给多模态 LLM 看。
+# 缺失时不会失败，但只能做纯文本校准（效果差很多）。
+render = ["pypdfium2>=4.25"]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+pdf2epub = "pdf2epub.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
