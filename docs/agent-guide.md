@@ -31,6 +31,54 @@ pdf2epub run                              # 继续；已完成的阶段不会重
 
 ---
 
+## 大书：按页数或章节分批，不要一次性喂进去
+
+`pdf2epub.toml` 里的 `max_pages_per_task = 200` 是 MinerU 的单任务上限。超了，
+prepare 会**自动**把 PDF 按页切成几份再提交，并按 chunk 偏移把页码映射回原书——
+这条是机械事，你什么都不用做，工单里看到的"第 N 页"就是原书页码。
+
+但**你的活不能按整本书一次性做**。300+ 页的书，`calibrate/source.md` 有几十万字：
+一次性读完再写成 EPUB，上下文塞不下，也没法逐段复核。规矩是**按页数或章节分批，
+一批做完再做下一批**：
+
+| 阶段 | 分批粒度 | 具体做法 |
+| --- | --- | --- |
+| 校准 | 50～100 页，或一章 | 只核对这一段的低分段（`segments.json` 里按页码筛），改完 `source.md` 再跑下一批 |
+| 撰写 | 一章一个 xhtml | 写完一章就 `pdf2epub run` 打包校验一次，过了再写下一章；不要在一条回复里输出整本书 |
+
+分批**不是**把书拆成几个 run，而是在同一份工作稿 / 同一个 `build/` 上分次动手：
+`source.md` 和 `build/OEBPS/text/` 都是累加的，中途 `pdf2epub run` 不会丢掉已有内容
+（注意 `scripts/compose_mathml.py` 会清空 `text/` 重写，要分批手写就别用它）。
+
+### 先看清章节边界：`scripts/split_pdf.py`
+
+不知道在哪切、一章几页，先 `--list`：
+
+```bash
+python scripts/split_pdf.py "book.pdf" --list
+```
+
+它会打出页数、书签目录，以及流水线会自动切成几份。要真落成分文件就用：
+
+```bash
+# 按一级书签切，每份不超过 80 页（只在章节之间切，不会切在章中间）
+python scripts/split_pdf.py "book.pdf" --by-chapters --max-pages 80 -o chunks/
+
+# 没有书签、或者书签不可信：纯按页数切
+python scripts/split_pdf.py "book.pdf" --by-pages 80 -o chunks/
+
+# 自己指定页段（1 基闭区间）
+python scripts/split_pdf.py "book.pdf" --ranges 1-40,41-120 -o chunks/
+```
+
+产出 `chunks/<stem>.p0001-0080.pdf` 和一份 `chunks/split-manifest.json`（每份的起止
+页码、页数、对应章标题，可直接用来规划分批）。加 `--dry-run` 只出计划、不写文件。
+
+**别把切出来的分片再喂给 `pdf2epub init`**——那会变成几个互不相干的 run，最后合不成
+一本书。唯一合理的例外：某一章 OCR 特别差，想单独拿它试一次 MinerU。
+
+---
+
 ## 关卡一：校准（calibrate）
 
 ### 会给你什么
@@ -50,6 +98,9 @@ pdf2epub run                              # 继续；已完成的阶段不会重
 2. **逐页打开 `pages/*.png`**，把图上内容和工作稿里的对应段落比。
 3. 只改**确认是识别错误**的地方，改在 `source.md` 里。
 4. 改完 `pdf2epub run`。确认不用改就 `pdf2epub done calibrate --note "…"`。
+
+书厚就按页段分批，一次只核对一段（见上面的「大书」）：低分段一多，整本啃完
+既慢又容易看走眼。
 
 ### 别一页页硬啃，先按模式找
 
@@ -103,6 +154,9 @@ python scripts/compose_mathml.py --run <run 目录> \
 
 它把机械的部分做掉：标题分级、段落/列表、`$$…$$` 与 `$…$` 转 MathML、
 公式编号右对齐、转义、`book.json`。**需要 `pip install latex2mathml`。**
+
+**书厚的不用死等它**：它会清空 `text/` 一次性重写，几百页的书按章分批手写更稳
+（见上面的「大书」）。
 
 它是示例脚本，不是流水线的一步——章节怎么切、标题叫什么，仍然由你定，
 也应该由你复核。脚本跑完**务必检查**：
@@ -193,11 +247,22 @@ XML 良构、能解析、能打包，**只有跑真校验才会暴露**。
 
 用户明确说过："没人看"。一行标题就够。
 
+### 5. 跑测试不该产生批量删除（`tests/conftest.py` 已覆盖 `tmp_path`）
+
+pytest 默认只保留最近 3 次会话的 `pytest-N` 临时目录，**每次跑测试都会把更早那一份
+整棵删掉**——一次几百个文件（实测每份约 300 个文件，连 `pytest-current` 符号链接算
+600 多个）。沙箱化的 IDE 会把这种批量删除当成破坏性操作拦下来，agent 就没法一直
+自动跑下去了。
+
+所以 `tests/conftest.py` 覆盖了内置的 `tmp_path`：每个测试一个独享目录，但永不自动
+删除。跑测试不再产生任何删除，代价是临时目录要手动清。
+
 ---
 
 ## 一轮下来的检查清单
 
 - [ ] `pdf2epub doctor` 全绿（Token、页面渲染、EPUBCheck）
+- [ ] 书厚的话：确实是按页段 / 按章分批做的，没有一次性啃完整本
 - [ ] 校准：按模式搜过一遍，可疑处都对着页面图确认过，`notes.md` 记了改动
 - [ ] 撰写：章节切分复核过，标题正确，公式是合法 MathML
 - [ ] 校验：`check/report.md` 里 FATAL/ERROR 为 0

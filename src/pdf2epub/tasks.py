@@ -44,6 +44,12 @@ th, td { border: 1px solid #999; padding: 0.3em 0.6em; }
 #: 所以这句话不能出现在任何真实内容里。
 SAMPLE_MARKER = "这是样例章节，用来说明文件应该长什么样"
 
+#: 页数达到这个量级就该在工单里提醒"按章分批，别一次写完"。
+#: 薄的书一次写完没问题，对它们念叨只是噪音。
+BULK_BOOK_PAGES = 100
+#: 低分段条数达到这个量级就提醒分批核对。
+BULK_WARN_SEGMENTS = 60
+
 SAMPLE_CHAPTER = f"""\
 <?xml version="1.0" encoding="utf-8"?>
 <!DOCTYPE html>
@@ -309,6 +315,15 @@ def _calibration_report(
         )
         return "\n".join(out)
 
+    if len(low) >= BULK_WARN_SEGMENTS:
+        out.extend(
+            [
+                "> **清单很长，按页码分批**：一次只核对一段（50～100 页，或一章），"
+                "改完重跑 `pdf2epub run` 再进下一段。整本一次性核完，慢且容易看走眼。",
+                "",
+            ]
+        )
+
     out.extend(["## 低分段落清单（分数升序）", ""])
     for index, segment in enumerate(low, 1):
         excerpt = _excerpt(source_text, segment.text, 1200)
@@ -397,6 +412,34 @@ def scaffold_compose(run: Run, bundles: list[Bundle], config: ComposeConfig) -> 
     )
 
 
+def _bulk_hint(run: Run) -> list[str]:
+    """书厚时的分批要求。
+
+    MinerU 的 200 页限制由 prepare 自动切分解决，那是机械事；这里要解决的是
+    **LLM 的上下文**——300+ 页的书一次写完既不现实，也没法逐章复核。
+    """
+    profile = run.counters.get("pdf") or {}
+    pages = int(profile.get("page_count") or 0)
+    if pages < BULK_BOOK_PAGES:
+        return []
+    return [
+        "## 这本书要分批写（重要）",
+        "",
+        f"原书 {pages} 页，**不要一次写完**——按章写 `OEBPS/text/*.xhtml`：",
+        "",
+        "1. 一章一个文件，写完就 `pdf2epub run` 打包 + 校验，过了再写下一章；",
+        "2. `build/` 是累加的，中途跑 `run` 不会丢掉已经写好的章节；",
+        "3. 不知道在哪切、一章几页，先看清章节边界与页数：",
+        "",
+        "```",
+        f'python scripts/split_pdf.py "{run.input_pdf}" --list',
+        "```",
+        "",
+        "要落成小文件就加 `--by-chapters --max-pages 80 -o chunks/`。",
+        "",
+    ]
+
+
 def _compose_report(run: Run, images: dict[str, str], *, sample: bool) -> str:
     return "\n".join(
         [
@@ -459,6 +502,7 @@ def _compose_report(run: Run, images: dict[str, str], *, sample: bool) -> str:
             "以及 MinerU 的解析产物，**不要自己编内容**。",
             "",
         ]
+        + _bulk_hint(run)
         + (
             [
                 "## 样例",

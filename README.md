@@ -269,6 +269,9 @@ pytest
 
 测试用伪造的 MinerU 产物跑通整条链路，不需要联网、不需要 Token。
 
+测试的临时目录在系统临时目录下的 `pdf2epub-tests-<pid>/`，**跑完不自动清理**（见
+`tests/conftest.py` 里覆盖 `tmp_path` 的原因）。看过结果后自己删掉即可。
+
 ### 代码地图
 
 ```
@@ -289,7 +292,8 @@ src/pdf2epub/
 └── alerts.py        告警出口
 
 scripts/
-└── compose_mathml.py  示例：把 source.md 写成章节（公式转 MathML）
+├── compose_mathml.py  示例：把 source.md 写成章节（公式转 MathML）
+└── split_pdf.py       顺手工具：按页码 / 页段 / 章节拆分 PDF，供分批干活
 
 docs/
 └── agent-guide.md     三个关卡上具体怎么干活 + 踩过的坑

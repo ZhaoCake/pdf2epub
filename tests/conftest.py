@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import itertools
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -246,6 +249,24 @@ def make_run(
     record.started_at = record.finished_at = 0.0
     run.save()
     return run, config
+
+
+#: 测试自己的临时目录根。**刻意不交给 pytest 管**。
+#:
+#: pytest 默认只保留最近 3 次会话的 ``pytest-N`` 目录，每次跑测试都会把更早的那一份
+#: 整棵删掉——一次就是几百个文件（实测每份约 300 个文件、连符号链接算 600 多个）。
+#: 沙箱化的 IDE 会把这种批量删除当成破坏性操作拦下来，测试就没法一直自动跑下去。
+#: 自己发号、自己留着，跑测试就不再产生任何删除；清理交给用户/系统。
+TMP_ROOT = Path(tempfile.gettempdir()) / f"pdf2epub-tests-{os.getpid()}"
+_TMP_SEQ = itertools.count(1)
+
+
+@pytest.fixture()
+def tmp_path() -> Path:
+    """覆盖内置的 ``tmp_path``：每个测试一个独享目录，但永不自动删除。"""
+    path = TMP_ROOT / f"t{next(_TMP_SEQ):04d}"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @pytest.fixture()
