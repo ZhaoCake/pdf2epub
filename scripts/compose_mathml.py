@@ -298,7 +298,8 @@ def render_body(markdown: str, *, is_toc: bool) -> str:
 
 
 #: 一级章节：`## 摘要` / `## 目录` / `## 参考文献` / `## 3 标题`（数字后**不带点**）。
-#: MinerU 把一级章和二级小节都输出成 `##`，靠"编号里有没有点"区分。
+#: 注意：这套"编号里有没有点"的启发式是按 MinerU 的输出调的；PaddleOCR 的
+#: markdown 标题层级可能不同，用它切章前先复核切出来的结果。
 TOP_LEVEL = re.compile(r"^##\s+(.+?)\s*$")
 NUMBERED_SECTION = re.compile(r"^\d+(\.\d+)*\s+\S")
 

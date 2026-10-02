@@ -417,12 +417,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     version = f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     record("python", sys.version_info >= (3, 10), version, "需要 Python 3.10+")
 
-    token = config.mineru.resolve_token()
+    token = config.paddle.resolve_token()
     record(
-        "MinerU Token",
+        "PaddleOCR Token",
         bool(token),
-        "已配置" if token else f"未配置（环境变量 {config.mineru.token_env}）",
-        "到 https://mineru.net/apiManage/token 创建后设置环境变量",
+        "已配置" if token else f"未配置（环境变量 {config.paddle.token_env}）",
+        "到 AI Studio（aistudio.baidu.com）的 PaddleOCR 服务创建 Token 后设置环境变量",
     )
 
     for module, package, hint in (
@@ -454,7 +454,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     workdir = Path(config.workdir)
     record("工作目录", True, f"{workdir}（将自动创建）")
     record("配置文件", True, config.source_path or f"未找到 {DEFAULT_CONFIG_NAME}，使用内置默认值")
-    record("环境文件", True, config.env_path or f"未找到 {DEFAULT_ENV_NAME}（可用它放 MINERU_TOKEN）")
+    record("环境文件", True, config.env_path or f"未找到 {DEFAULT_ENV_NAME}（可用它放 PADDLE_TOKEN）")
 
     printer.set("checks", checks)
     failed = [c for c in checks if not c["ok"]]

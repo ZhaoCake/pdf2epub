@@ -1,11 +1,11 @@
 """配置加载：内置默认值 < ``.env`` < TOML 文件 < 真实环境变量 < 显式覆盖。
 
 环境变量覆盖规则：``PDF2EPUB__SECTION__KEY``，例如
-``PDF2EPUB__MINERU__MODEL_VERSION=vlm``、``PDF2EPUB__WORKDIR=d:/tmp/run``。
+``PDF2EPUB__PADDLE__MODEL=PaddleOCR-VL-1.6``、``PDF2EPUB__WORKDIR=d:/tmp/run``。
 值为字符串，会按目标字段的默认类型自动做 bool/int/float/list 转换。
 
 ``.env``（当前工作目录下）专门用来放 Token 这类密钥，内容会被注入 ``os.environ``，
-因此 :meth:`MineruConfig.resolve_token` 也能直接读到。已有同名环境变量时不覆盖。
+因此 :meth:`PaddleConfig.resolve_token` 也能直接读到。已有同名环境变量时不覆盖。
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ def load_env_file(path: Path | str | None = None, *, cwd: Path | None = None) ->
 
     规则：
     - **已有的真实环境变量优先**，``.env`` 只补空缺。这样临时
-      ``$env:MINERU_TOKEN=...`` 覆盖 ``.env`` 的行为符合直觉。
+      ``$env:PADDLE_TOKEN=...`` 覆盖 ``.env`` 的行为符合直觉。
     - 支持 ``KEY=VALUE``、``export KEY=VALUE``、``#`` 注释、单双引号包裹。
     - 值**原样使用**，不做变量展开——secret 里出现 ``$`` 不该被吃掉。
     """
@@ -73,15 +73,18 @@ def load_env_file(path: Path | str | None = None, *, cwd: Path | None = None) ->
 
 
 @dataclass
-class MineruConfig:
-    base_url: str = "https://mineru.net"
-    token_env: str = "MINERU_TOKEN"
+class PaddleConfig:
+    """PaddleOCR（AI Studio 承载的 PaddleOCR-VL）解析后端。"""
+
+    base_url: str = "https://paddleocr.aistudio-app.com"
+    token_env: str = "PADDLE_TOKEN"
     token: str = ""
-    model_version: str = "vlm"
-    is_ocr: str = "auto"
-    enable_formula: bool = True
-    enable_table: bool = True
-    extra_formats: list[str] = field(default_factory=list)
+    model: str = "PaddleOCR-VL-1.6"
+
+    #: optionalPayload 开关（官方示例给出的三项）
+    use_doc_orientation_classify: bool = False
+    use_doc_unwarping: bool = False
+    use_chart_recognition: bool = False
 
     poll_interval: float = 5.0
     poll_timeout: float = 3600.0
@@ -89,10 +92,12 @@ class MineruConfig:
     max_retries: int = 4
     retry_backoff: float = 2.0
 
-    max_pages_per_task: int = 200
+    #: 每片页数。API 本身没有页数限制的说法，但默认取 20：小片并行解析更快，
+    #: 片与片的接缝（前一片末页 + 后一片首页）也才核得过来。见 boundary.py。
+    max_pages_per_task: int = 20
     max_bytes_per_task: int = 200_000_000
+    #: 一次 run 最多同时提交多少个解析 job（防止失控刷爆额度）
     max_files_per_batch: int = 50
-    concurrency: int = 4
 
     def resolve_token(self) -> str:
         if self.token:
@@ -156,7 +161,7 @@ class Config:
     alert_webhook: str = ""
     alert_command: str = ""
 
-    mineru: MineruConfig = field(default_factory=MineruConfig)
+    paddle: PaddleConfig = field(default_factory=PaddleConfig)
     calibrate: CalibrateConfig = field(default_factory=CalibrateConfig)
     compose: ComposeConfig = field(default_factory=ComposeConfig)
     validate: ValidateConfig = field(default_factory=ValidateConfig)
@@ -307,12 +312,8 @@ def _set_dotted(config: Config, dotted: str, value: Any, *, from_env: bool = Fal
 
 
 def _validate(config: Config) -> None:
-    if config.mineru.is_ocr not in {"auto", "true", "false", True, False}:
-        raise ConfigError("mineru.is_ocr 只能是 auto / true / false")
-    if isinstance(config.mineru.is_ocr, str):
-        config.mineru.is_ocr = config.mineru.is_ocr.lower()
-    if config.mineru.model_version not in {"pipeline", "vlm", "MinerU-HTML"}:
-        raise ConfigError("mineru.model_version 只能是 pipeline / vlm / MinerU-HTML")
+    if not config.paddle.model.strip():
+        raise ConfigError("paddle.model 不能为空")
     if not 0.0 <= config.calibrate.critical_score <= config.calibrate.score_threshold <= 1.0:
         raise ConfigError(
             "calibrate 阈值不合法：需要 0 <= critical_score <= score_threshold <= 1"

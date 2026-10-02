@@ -9,9 +9,9 @@
           input.pdf              # 输入副本（内容寻址，避免源文件被改动）
           logs/pipeline.jsonl
           alerts.json
-          chunks/                # 超限 PDF 的切分产物
-          mineru/
-            batch.json           # 提交记录
+          chunks/                # 切分产物（每片一个 PDF）
+          parsing/
+            jobs.json            # 提交给解析后端的 job 清单
             zips/                # 官方 API 返回的原始 zip
             extracted/           # 解压后的解析产物（原样保留，不加工）
           calibrate/             # ① 脚本派单、LLM 校准低分段落
@@ -19,7 +19,7 @@
             segments.json        #   机器可读的同一份清单
             source.md            #   ★ LLM 直接编辑这个文件
             pages/*.png          #   相关页的渲染图（含上下文页）
-            images/              #   MinerU 抽出的图，供对照
+            images/              #   解析抽出的图，供对照
           build/                 # ② LLM 直接在这里写 EPUB 内容
             book.json            #   ★ 书目 + 阅读顺序（LLM 写）
             OEBPS/text/*.xhtml   #   ★ 章节正文（LLM 写）
@@ -62,7 +62,7 @@ STATE_VERSION = 1
 class Stage(str, Enum):
     """四个阶段，边界就是"谁来干活"。"""
 
-    PREPARE = "prepare"        # 脚本：解析 PDF -> MinerU -> 解压产物
+    PREPARE = "prepare"        # 脚本：切分 PDF -> 解析后端 -> 产物归一
     CALIBRATE = "calibrate"    # LLM：对着页面图校准低分段落
     COMPOSE = "compose"        # LLM：把内容直接写成 EPUB 的 XHTML
     CHECK = "check"            # 脚本：打包 + 格式校验 + 出报告
@@ -244,16 +244,18 @@ class Run:
         return self.root / "chunks"
 
     @property
-    def zips_dir(self) -> Path:
-        return self.root / "mineru" / "zips"
-
-    @property
     def extracted_dir(self) -> Path:
-        return self.root / "mineru" / "extracted"
+        return self.root / "parsing" / "extracted"
 
     @property
-    def batch_path(self) -> Path:
-        return self.root / "mineru" / "batch.json"
+    def jobs_path(self) -> Path:
+        """提交给解析后端的 job 清单（job_id -> 分片）。"""
+        return self.root / "parsing" / "jobs.json"
+
+    @property
+    def boundary_path(self) -> Path:
+        """分片交界处校验的结论（每片页数对账 + 接缝清单）。"""
+        return self.root / "parsing" / "boundary.md"
 
     # ---- 校准工作区（LLM 编辑 source.md）--------------------------------
     @property
@@ -430,7 +432,7 @@ class RunStore:
         if root.exists():
             raise InputError(f"运行目录已存在：{root}（换个 --run-id 或先清理）")
 
-        for sub in ("logs", "chunks", "mineru/zips", "mineru/extracted", "review/packets", "build", "output"):
+        for sub in ("logs", "chunks", "parsing/extracted", "review/packets", "build", "output"):
             (root / sub).mkdir(parents=True, exist_ok=True)
 
         run = Run(

@@ -2,7 +2,7 @@
 
 两个工单，边界就是"谁来干活"：
 
-- **校准工单**（``calibrate/``）：脚本挑出 MinerU 自己都没把握的段落，
+- **校准工单**（``calibrate/``）：脚本挑出解析后端没把握的段落和所有分片接缝，
   渲染相关页的截图，让 LLM 对着图把文本改对。LLM 直接编辑 ``calibrate/source.md``。
 - **撰写工单**（``build/``）：脚本把图片搬好、书目模板和样例章节摆好，
   LLM 直接写 ``build/book.json`` 与 ``build/OEBPS/text/*.xhtml``。
@@ -110,12 +110,73 @@ class Task:
 def _bundle_offsets(run: Run, bundles: list[Bundle]) -> list[tuple[Bundle, int]]:
     """给每个产物配上它在整本书里的起始页码。
 
-    多 chunk 时 MinerU 的页码是**局部**的，不加上偏移，第 2 个 chunk 的低分段
+    多 chunk 时解析后端的页码是**局部**的，不加上偏移，第 2 个 chunk 的低分段
     会被标成第 1 页，渲染出来的页面图就全对不上了。
     """
     chunks = run.counters.get("chunks") or []
     starts = {str(c.get("chunk_id")): int(c.get("page_start") or 0) for c in chunks}
     return [(bundle, starts.get(bundle.root.name, 0)) for bundle in bundles]
+
+
+def boundary_seams(run: Run) -> list[dict[str, Any]]:
+    """prepare 阶段交界处校验留下的接缝清单（没有就返回空表）。"""
+    info = run.counters.get("boundary") or {}
+    seams = info.get("seams") or []
+    return [seam for seam in seams if isinstance(seam, dict)]
+
+
+def seam_page_indices(seams: list[dict[str, Any]]) -> list[int]:
+    """接缝两页的 0 基页下标，用于渲染页面图。"""
+    indices: set[int] = set()
+    for seam in seams:
+        for key in ("left_page", "right_page"):
+            page = seam.get(key)
+            if isinstance(page, int) and page >= 1:
+                indices.add(page - 1)
+    return sorted(indices)
+
+
+def _seam_section(run: Run, seams: list[dict[str, Any]]) -> list[str]:
+    """分片交界处的核对清单：每道缝的两页都必须看图。"""
+    if not seams:
+        return []
+    lines: list[str] = [
+        "## 交界处核对（必做）",
+        "",
+        "解析是按片做的，下面每道缝的两页是**片与片的交界**。对着页面图看一遍：",
+        "接缝上下一句要能接上，**不能断在半句，也不能重复一整段**。",
+        "",
+        "| 缝 | 位置 | 页 | 截图 | 该页解析出的字数 |",
+        "| --- | --- | --- | --- | --- |",
+    ]
+    for seam in seams:
+        for label, page_key, chars_key in (
+            ("前一片末页", "left_page", "left_chars"),
+            ("后一片首页", "right_page", "right_chars"),
+        ):
+            page = seam.get(page_key)
+            if not isinstance(page, int):
+                continue
+            chars = seam.get(chars_key, -1)
+            if not isinstance(chars, int) or chars < 0:
+                count = "数不出来"
+            elif chars == 0:
+                count = "**0（可疑，重点看）**"
+            else:
+                count = str(chars)
+            lines.append(
+                f"| {seam.get('index')} | {label} | 第 {page} 页 | "
+                f"`{run.pages_dir / f'page-{page:04d}.png'}` | {count} |"
+            )
+    lines.extend(
+        [
+            "",
+            "核对结果写进 `notes.md`：哪道缝对过了、哪道不对、怎么处理的。",
+            "页数对账的完整结论在 `" + str(run.boundary_path) + "`。",
+            "",
+        ]
+    )
+    return lines
 
 
 def _page_sizes(run: Run, bundle: Bundle) -> dict[int, tuple[float, float]]:
@@ -151,7 +212,7 @@ def scaffold_calibration(
         chunks = [read_markdown(bundle.markdown) for bundle in bundles]
         merged = "\n\n".join(text for text in chunks if text.strip())
         if not merged.strip():
-            merged = "<!-- MinerU 没有返回 Markdown。可参考 images/ 与 pages/ 自行转写。 -->\n"
+            merged = "<!-- 解析后端没有返回 Markdown。可参考 images/ 与 pages/ 自行转写。 -->\n"
         source.write_text(merged, encoding="utf-8")
         log.info("已生成校准工作稿：%s（%d 字）", source, len(merged))
 
@@ -180,7 +241,7 @@ def scaffold_calibration(
         },
     )
 
-    # 3) 渲染相关页（含上下文页），并搬运 MinerU 抽出的图
+    # 3) 渲染相关页（含上下文页与接缝页），并搬运解析抽出的图
     wanted: set[int] = set()
     for segment in low:
         for offset in range(-config.context_pages, config.context_pages + 1):
@@ -188,10 +249,21 @@ def scaffold_calibration(
             if page_idx >= 0:
                 wanted.add(page_idx)
 
+    # 接缝那两页无论如何都要渲染：分片边界丢了东西，只会在这里露出来
+    seams = boundary_seams(run)
+    wanted.update(seam_page_indices(seams))
+
     pages = _render_pages(pdf_path, sorted(wanted), run.pages_dir, config)
     images = copy_images(bundles, run.calibrate_dir / "images")
 
-    report = _calibration_report(run, low, pages, images, merged_source_len=len(read_markdown(source)))
+    report = _calibration_report(
+        run,
+        low,
+        pages,
+        images,
+        merged_source_len=len(read_markdown(source)),
+        seams=seams,
+    )
     run.calibrate_report.write_text(report, encoding="utf-8")
 
     if low and not pages:
@@ -211,6 +283,7 @@ def scaffold_calibration(
             "low_segments": len(low),
             "pages_rendered": len(pages),
             "images": len(images),
+            "seams": len(seams),
         },
     )
 
@@ -264,19 +337,22 @@ def _calibration_report(
     images: dict[str, str],
     *,
     merged_source_len: int,
+    seams: list[dict[str, Any]] | None = None,
 ) -> str:
     source_text = read_markdown(run.calibrate_source)
+    seams = seams or []
+    boundary_info = run.counters.get("boundary") or {}
     out: list[str] = [
         "# 校准工单",
         "",
-        "MinerU 把这本书解析出来了，但有些地方**它自己也没把握**。",
+        "解析后端把这本书解析出来了，但有些地方**它可能没认对**。",
         "请对着页面截图，把认错的地方改对。",
         "",
         "## 你要改的东西",
         "",
         f"- 唯一的可编辑文件：`{run.calibrate_source}`",
         f"- 页面截图：`{run.pages_dir}`（`page-0007.png` = 第 7 页）",
-        f"- MinerU 抽出的图片：`{run.calibrate_dir / 'images'}`",
+        f"- 解析抽出的图片：`{run.calibrate_dir / 'images'}`",
         f"- 原始 PDF：`{run.input_pdf}`",
         f"- 机器可读的同一份清单：`{run.segments_path}`",
         f"- 改完执行：`pdf2epub run`（或 `pdf2epub done calibrate`）",
@@ -295,18 +371,20 @@ def _calibration_report(
         "| 项目 | 值 |",
         "| --- | --- |",
         f"| 工作稿字数 | {merged_source_len} |",
+        f"| 分片 | {boundary_info.get('chunk_count', 1)} 片 / {len(seams)} 道缝 |",
         f"| 带分数的段落 | {len(low)} 条低于阈值（全部低分段） |",
         f"| 已渲染页面 | {len(pages)} 张 |",
         f"| 已搬运图片 | {len(images)} 张 |",
         "",
     ]
+    out.extend(_seam_section(run, seams))
 
     if not low:
         out.extend(
             [
                 "## 好消息",
                 "",
-                "MinerU 没有给出任何低置信度段落。你可以：",
+                "解析后端没有给出任何低置信度段落。你可以：",
                 "",
                 "1. 快速浏览一遍 `source.md`，有问题就顺手改；",
                 "2. 没问题就直接执行 `pdf2epub done calibrate` 进入撰写阶段。",
@@ -334,7 +412,7 @@ def _calibration_report(
                 f"- 编号：`{segment.segment_id}`",
                 f"- 截图：`{run.pages_dir / f'page-{segment.page_no:04d}.png'}`",
                 "",
-                "MinerU 认出来的原文：",
+                "解析出来的原文：",
                 "",
                 "```text",
                 segment.text[:1200],
@@ -415,7 +493,7 @@ def scaffold_compose(run: Run, bundles: list[Bundle], config: ComposeConfig) -> 
 def _bulk_hint(run: Run) -> list[str]:
     """书厚时的分批要求。
 
-    MinerU 的 200 页限制由 prepare 自动切分解决，那是机械事；这里要解决的是
+    解析分片（每片 20 页）由 prepare 自动完成，那是机械事；这里要解决的是
     **LLM 的上下文**——300+ 页的书一次写完既不现实，也没法逐章复核。
     """
     profile = run.counters.get("pdf") or {}
@@ -499,7 +577,7 @@ def _compose_report(run: Run, images: dict[str, str], *, sample: bool) -> str:
             "并且每个 `<img>` 都要有 `alt`。",
             "",
             "内容来源是 `" + str(run.calibrate_source) + "`（校准后的工作稿）"
-            "以及 MinerU 的解析产物，**不要自己编内容**。",
+            "以及解析产物，**不要自己编内容**。",
             "",
         ]
         + _bulk_hint(run)

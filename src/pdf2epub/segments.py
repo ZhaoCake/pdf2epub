@@ -1,6 +1,7 @@
-"""从 MinerU 产物里抽出"带置信度的段落"。
+"""从解析产物里抽出"带置信度的段落"。
 
-这是脚本唯一需要"读懂"MinerU 的地方，所以刻意做得又笨又宽：
+这是脚本唯一需要"读懂"解析产物 schema 的地方，所以刻意做得又笨又宽：
+（PaddleOCR-VL 不输出置信度，这套抽取主要服务带分数的历史产物 / 未来后端。）
 
 - 有 ``content_list`` 就用它——它是按阅读顺序排好的正文，最接近 LLM 要的东西；
 - ``content_list`` 没带分数时，拿 ``model.json`` 的版面框按 IoU 去配对拿分数；
@@ -32,7 +33,7 @@ PAGE_CONTAINER_KEYS = ("layout_dets", "blocks", "elements", "items", "content_li
 
 @dataclass
 class Segment:
-    """一段被 MinerU 打了分的内容。"""
+    """一段被解析后端打了分的内容。"""
 
     segment_id: str
     page_idx: int
@@ -580,7 +581,7 @@ def _iter_children(page_node: Any) -> Iterable[Any]:
 def low_confidence(segments: list[Segment], *, threshold: float, limit: int) -> list[Segment]:
     """挑出需要校准的段落：分数越低越靠前。
 
-    没有分数的段落不进清单——它们已经在 MinerU 的默认输出里了，
+    没有分数的段落不进清单——它们已经在解析的默认输出里了，
     校准的重点是"机器自己都没把握"的那部分。
     """
     scored = [s for s in segments if s.score is not None and s.score < threshold]

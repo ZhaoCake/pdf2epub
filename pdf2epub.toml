@@ -4,42 +4,45 @@
 # 优先级：环境变量 (PDF2EPUB__SECTION__KEY) > 本文件 > 内置默认值
 #
 # 流水线只有四步，配置也只有四块：
-#   prepare   脚本：解析 PDF -> MinerU -> 解压产物
-#   calibrate LLM ：对着页面图校准低分段落
+#   prepare   脚本：切分 PDF -> PaddleOCR -> 产物归一
+#   calibrate LLM ：对着页面图校准（含接缝核对）
 #   compose   LLM ：把内容直接写成 EPUB
 #   check     脚本：打包 + 格式校验
 # ============================================================================
 
 workdir = ".pdf2epub"          # 运行目录（中间产物、日志、告警都在这里）
-language = "ch"                # 解析语言，透传给 MinerU
+language = "ch"                # 解析语言（PaddleOCR 自行识别，这里主要用于工单文案）
 log_level = "INFO"
 log_json = true                # 结构化日志，便于机器读取
 alert_webhook = ""             # 可选：告警 POST 到该 URL
 alert_command = ""             # 可选：告警时执行的外部命令
 
 # ---------------------------------------------------------------------------
-# MinerU 官方 API（https://mineru.net/apiManage/docs）
+# PaddleOCR 解析后端（AI Studio 承载的 PaddleOCR-VL）
 # ---------------------------------------------------------------------------
-[mineru]
-base_url = "https://mineru.net"
-token_env = "MINERU_TOKEN"     # 从哪个环境变量读 Token
-model_version = "vlm"          # pipeline | vlm | MinerU-HTML
-is_ocr = "auto"                # auto | true | false，auto 时按页面是否含文本层决定
-enable_formula = true
-enable_table = true
-extra_formats = []             # ["docx","html","latex"]，一般不需要
+[paddle]
+base_url = "https://paddleocr.aistudio-app.com"
+token_env = "PADDLE_TOKEN"     # 从哪个环境变量读 Token
+model = "PaddleOCR-VL-1.6"
+
+use_doc_orientation_classify = false
+use_doc_unwarping = false
+use_chart_recognition = false
 
 poll_interval = 5.0            # 轮询间隔（秒）
-poll_timeout = 3600.0          # 单个任务最长等待（秒）
+poll_timeout = 3600.0          # 单个 job 最长等待（秒）
 http_timeout = 60.0
 max_retries = 4                # 网络/5xx 重试次数
 retry_backoff = 2.0
 
-# 官方限制（超出会自动切分 PDF）
-max_pages_per_task = 200
+# 每片页数刻意取小（20 页），不是"保险起见"，是两条硬理由：
+#   1. 一个分片一个解析 job，小片并行，整本书更快出结果；
+#   2. 片与片之间的接缝（前一片末页 + 后一片首页）是唯一"跨边界"的地方，
+#      片小才核得过来——prepare 会逐片对账页数、把接缝页列出来，
+#      见 <run>/parsing/boundary.md，校准工单里也要求对着页面图核对接缝两页。
+max_pages_per_task = 20
 max_bytes_per_task = 200000000
-max_files_per_batch = 50
-concurrency = 4                # 并发提交/轮询的任务数
+max_files_per_batch = 50       # 一次 run 最多提交多少个 job（防止刷爆额度）
 
 # ---------------------------------------------------------------------------
 # 校准：挑出 MinerU 自己也没把握的段落，交给 LLM 对着页面图改

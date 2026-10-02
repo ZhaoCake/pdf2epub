@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pdf2epub"
 version = "0.2.0"
-description = "PDF -> EPUB：MinerU 负责解析，LLM 负责判断与转写，脚本负责搬运、打包与校验"
+description = "PDF -> EPUB：PaddleOCR 负责解析，LLM 负责判断与转写，脚本负责搬运、打包与校验"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

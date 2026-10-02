@@ -14,7 +14,7 @@ TODO
 
 这个项目的前提很简单：**脚本不该去猜内容**。
 
-MinerU 解析得不错，但总有些段落它自己也没把握（形近字、串列、公式符号）。判断这些
+解析后端（PaddleOCR-VL）再好，也总有没把握的段落（形近字、串列、公式符号）。判断这些
 地方对不对，需要看原页面、理解上下文——这是 LLM 的活。把内容转写成 EPUB 的章节结构
 同样是 LLM 的活。脚本该干的是搬运、截图、打包、校验这些机械事。
 
@@ -27,7 +27,7 @@ MinerU 解析得不错，但总有些段落它自己也没把握（形近字、�
 
 | 阶段 | 谁干活 | 产出 |
 | --- | --- | --- |
-| `prepare` | 脚本 | 解析 PDF → 调 MinerU → 解压产物（原样保存，不加工） |
+| `prepare` | 脚本 | 切分 PDF → PaddleOCR 解析 → 产物归一 + 交界处校验 |
 | `calibrate` | **LLM** | 对着页面图校准低分段落，直接编辑 `calibrate/source.md` |
 | `compose` | **LLM** | 直接写 `build/book.json` 与 `build/OEBPS/text/*.xhtml` |
 | `check` | 脚本 | 生成 OPF/nav/container → 打包 → 自检 + EPUBCheck → 出报告 |
@@ -45,7 +45,7 @@ MinerU 解析得不错，但总有些段落它自己也没把握（形近字、�
 ```bash
 pip install -e ".[render]"     # render 提供页面渲染，强烈建议装
 
-export MINERU_TOKEN=...        # 或写进 pdf2epub.toml
+export PADDLE_TOKEN=...        # 或写进 pdf2epub.toml
 
 pdf2epub doctor                 # 环境自检
 pdf2epub init book.pdf
@@ -109,9 +109,14 @@ pdf2epub run                    # → 0，打包 + 校验通过，出书
 
 ## 校准阶段：脚本给 LLM 看什么
 
-脚本从 MinerU 的产物里把带置信度的段落捞出来（`content_list` 优先，缺分数就用
-`model.json` 的版面框按 IoU 配对；schema 完全不认识时递归找"有分数又有文本"的节点），
-低于 `calibrate.score_threshold` 的进工单：
+解析按 **20 页一片**提交（`paddle.max_pages_per_task`）：小片并行更快，接缝也才
+核得过来。prepare 收尾会做**交界处校验**——分片首尾相接不重不漏、每片产物页数 == 计划
+页数、每道缝的两页有没有解析出正文——结论写在 `parsing/boundary.md`，有问题发
+`BOUNDARY_CHECK` 告警。接缝那两页会被渲染成页面图，在校准工单里列为必做核对项。
+
+PaddleOCR-VL 不输出逐段置信度，所以低分清单通常为空，校准的**重点就是接缝核对**；
+工单的抽取逻辑仍兼容带分数的产物（`content_list` 优先，缺分数就用 `model.json`
+的版面框按 IoU 配对），低于 `calibrate.score_threshold` 的进工单：
 
 ```
 .calibrate/
@@ -119,7 +124,7 @@ pdf2epub run                    # → 0，打包 + 校验通过，出书
 ├── segments.json      ← 机器可读的同一份清单
 ├── source.md          ← ★ LLM 直接编辑这个
 ├── pages/page-0007.png ← 相关页截图（含前后各一页的上下文）
-└── images/            ← MinerU 抽出的图，供对照
+└── images/            ← 解析抽出的图，供对照
 ```
 
 报告里写死了几条规矩：只改识别错的地方、不要重写文案、看图确认没认错的就保持原样、
@@ -188,9 +193,10 @@ build/
 ├── input.pdf              # 输入副本
 ├── logs/pipeline.jsonl
 ├── alerts.json            # 告警历史（同一条告警只累计次数，不刷屏）
-├── mineru/
-│   ├── zips/              # 官方 API 返回的原始 zip
-│   └── extracted/         # 解压后的产物，原样保留
+├── parsing/
+│   ├── jobs.json          # 提交给解析后端的 job 清单
+│   ├── boundary.md        # 交界处校验：每片页数对账 + 接缝清单
+│   └── extracted/         # 归一后的产物，原样保留
 ├── calibrate/             # 校准工单 + 可编辑工作稿 + 页面图
 ├── build/                 # LLM 写的 EPUB 内容 + 脚本生成的包内文件
 ├── check/                 # 校验报告
@@ -210,20 +216,21 @@ build/
 `.env` 放在当前工作目录（项目根），专门用来放密钥，**会被自动加载**：
 
 ```ini
-MINERU_TOKEN=sk-...
+PADDLE_TOKEN=...
 ```
 
 它只补空缺：已经有同名环境变量时不覆盖，所以临时
-`$env:MINERU_TOKEN=...` 依然优先。值按字面使用，不做 `%TEMP%` 之类的变量展开。
+`$env:PADDLE_TOKEN=...` 依然优先。值按字面使用，不做 `%TEMP%` 之类的变量展开。
 
 其余配置写在 `pdf2epub.toml`，也能用 `PDF2EPUB__SECTION__KEY` 形式的环境变量覆盖
 （如 `PDF2EPUB__CALIBRATE__SCORE_THRESHOLD=0.8`）。完整清单见仓库里的
 [`pdf2epub.toml`](pdf2epub.toml)，常用的几个：
 
 ```toml
-[mineru]
-token_env = "MINERU_TOKEN"     # Token 从哪个环境变量读
-model_version = "vlm"          # pipeline | vlm | MinerU-HTML
+[paddle]
+token_env = "PADDLE_TOKEN"     # Token 从哪个环境变量读
+model = "PaddleOCR-VL-1.6"
+max_pages_per_task = 20        # 每片页数：片小则并行快，接缝也核得过来
 
 [calibrate]
 score_threshold = 0.75         # 低于此置信度的段落进校准清单
@@ -239,7 +246,7 @@ epubcheck_mode = "auto"        # auto | require | off
 ## 环境要求
 
 - Python 3.10+
-- MinerU Token：<https://mineru.net/apiManage/token>，写进 `.env`
+- PaddleOCR Token（AI Studio 承载的 PaddleOCR-VL）：在 AI Studio 创建，写进 `.env`
 - **页面渲染**（`pypdfium2` + `Pillow`）：装了才能做多模态校准；不装会退化成
   纯文本校准并告警
 - **EPUBCheck**（需要 Java）：<https://github.com/w3c/epubcheck/releases>
@@ -267,7 +274,7 @@ pip install -e ".[render,dev]"
 pytest
 ```
 
-测试用伪造的 MinerU 产物跑通整条链路，不需要联网、不需要 Token。
+测试用伪造的解析产物跑通整条链路，不需要联网、不需要 Token。
 
 测试的临时目录在系统临时目录下的 `pdf2epub-tests-<pid>/`，**跑完不自动清理**（见
 `tests/conftest.py` 里覆盖 `tmp_path` 的原因）。看过结果后自己删掉即可。
@@ -278,8 +285,9 @@ pytest
 src/pdf2epub/
 ├── cli.py           命令行
 ├── pipeline.py      四阶段调度与"谁来干活"的边界
-├── mineru_client.py MinerU 官方 API 客户端
-├── ingest.py        PDF 剖析与超限切分
+├── paddle.py        PaddleOCR 客户端 + JSONL -> bundle 产物归一
+├── ingest.py        PDF 剖析与切分（每片 20 页）
+├── boundary.py      分片交界处校验（每片页数对账 + 接缝清单）
 ├── bundle.py        产物解压与定位（不做任何加工）
 ├── segments.py      从产物里抽出带置信度的段落
 ├── tasks.py         给 LLM 的两个工单

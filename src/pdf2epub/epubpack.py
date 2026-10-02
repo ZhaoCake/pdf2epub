@@ -560,9 +560,12 @@ def pack(build_dir: Path, output: Path) -> Path:
         remove_tree(output)
 
     entries = _packable(build_dir)
+    #: zip 时间戳固定为 1980-01-01：不固定的话，同一份 build/ 两次打包的
+    #: 字节不一样（隔了一秒就变），"重打包不改动内容"的断言会随机翻车。
+    fixed_time = (1980, 1, 1, 0, 0, 0)
     with zipfile.ZipFile(output, "w") as archive:
         archive.writestr(
-            zipfile.ZipInfo("mimetype"),
+            zipfile.ZipInfo("mimetype", date_time=fixed_time),
             MIMETYPE.encode("ascii"),
             compress_type=zipfile.ZIP_STORED,
         )
@@ -570,7 +573,10 @@ def pack(build_dir: Path, output: Path) -> Path:
             relative = path.relative_to(build_dir).as_posix()
             if relative == "mimetype":
                 continue
-            archive.write(path, relative, compress_type=zipfile.ZIP_DEFLATED)
+            info = zipfile.ZipInfo(relative, date_time=fixed_time)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, path.read_bytes())
 
     log.info("EPUB 已打包：%s（%d 个条目，%.2f MB）", output.name, len(entries), output.stat().st_size / 1e6)
     return output

@@ -1,4 +1,4 @@
-"""测试夹具：假的 MinerU 产物 + 空白 PDF，不需要联网就能跑通整条链路。"""
+"""测试夹具：假的解析产物 + 空白 PDF，不需要联网就能跑通整条链路。"""
 
 from __future__ import annotations
 

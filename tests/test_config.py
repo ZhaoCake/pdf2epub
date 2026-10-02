@@ -13,7 +13,7 @@ from pdf2epub.errors import ConfigError
 def test_defaults():
     config = load_config(None, cwd="/nonexistent-path-for-defaults")
     assert config.workdir == ".pdf2epub"
-    assert config.mineru.model_version == "vlm"
+    assert config.paddle.model == "PaddleOCR-VL-1.6"
     assert config.calibrate.critical_score < config.calibrate.score_threshold
     assert config.validate.fail_on_severity == "ERROR"
 
@@ -44,7 +44,7 @@ def test_template_toml_is_valid():
 
     template = Path(__file__).resolve().parents[1] / "pdf2epub.toml"
     config = load_config(template)
-    assert config.mineru.model_version == "vlm"
+    assert config.paddle.model == "PaddleOCR-VL-1.6"
     assert config.validate.fail_on_severity == "ERROR"
 
 
@@ -96,10 +96,10 @@ class TestEnvFile:
         assert config.calibrate.max_segments == 9
 
     def test_token_resolves_from_env_file(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("MINERU_TOKEN", raising=False)
-        self._write(tmp_path, "MINERU_TOKEN=sk-from-dotenv\n")
+        monkeypatch.delenv("PADDLE_TOKEN", raising=False)
+        self._write(tmp_path, "PADDLE_TOKEN=sk-from-dotenv\n")
         config = load_config(None, cwd=tmp_path)
-        assert config.mineru.resolve_token() == "sk-from-dotenv"
+        assert config.paddle.resolve_token() == "sk-from-dotenv"
 
 
 def test_unknown_key_rejected(tmp_path):
@@ -136,10 +136,10 @@ def test_invalid_enum_rejected(tmp_path):
 def test_token_resolution(monkeypatch):
     monkeypatch.setenv("MY_TOKEN", "abc")
     config = Config()
-    config.mineru.token_env = "MY_TOKEN"
-    assert config.mineru.resolve_token() == "abc"
-    config.mineru.token = "explicit"
-    assert config.mineru.resolve_token() == "explicit"
+    config.paddle.token_env = "MY_TOKEN"
+    assert config.paddle.resolve_token() == "abc"
+    config.paddle.token = "explicit"
+    assert config.paddle.resolve_token() == "explicit"
 
 
 def test_dotted_overrides():

@@ -2,7 +2,7 @@
 
 ::
 
-    prepare    脚本   PDF -> MinerU -> 解压产物（原样保存）
+    prepare    脚本   PDF -> PaddleOCR -> 产物归一（原样保存 + 交界处校验）
     calibrate  LLM    对着页面截图校准低分段落（编辑 calibrate/source.md）
     compose    LLM    把内容直接写成 EPUB（write build/book.json + OEBPS/text/*.xhtml）
     check      脚本   打包 + 格式校验 + 出报告
@@ -17,11 +17,13 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import boundary, paddle
 from . import epubcheck as epubcheck_mod
 from . import epubpack, formatcheck, pageimage, tasks
 from .alerts import AlertCode, AlertSink, Severity
@@ -34,13 +36,13 @@ from .errors import (
     ComposeRequired,
     FormatRequired,
     InputError,
-    MinerUError,
+    ParseJobFailed,
     Pdf2EpubError,
     TaskError,
 )
-from .ingest import inspect_pdf, materialize_chunks, plan_chunks
+from .ingest import Chunk, PdfProfile, inspect_pdf, materialize_chunks, plan_chunks
 from .logutil import get_logger, set_context
-from .mineru_client import BatchFile, MinerUClient, ParseOptions, classify_failures
+from .paddle import JobOutcome, PaddleClient
 from .runstate import Run, Stage, StageStatus, fingerprint
 
 log = get_logger("pipeline")
@@ -201,15 +203,17 @@ class Pipeline:
         if profile.is_scanned:
             self.alerts.info(
                 AlertCode.SCANNED_PDF,
-                f"检测到扫描版 PDF（采样页均 {profile.sampled_chars_per_page:.0f} 字符），将走 OCR",
+                f"检测到扫描版 PDF（采样页均 {profile.sampled_chars_per_page:.0f} 字符），"
+                "由解析后端自行识别",
                 pages=profile.page_count,
             )
 
-        chunks = plan_chunks(profile, self.config.mineru, language=self.config.language)
+        chunks = plan_chunks(profile, self.config.paddle)
         if len(chunks) > 1:
             self.alerts.info(
                 AlertCode.SPLIT_REQUIRED,
-                f"PDF 超出 MinerU 单任务上限，切分为 {len(chunks)} 份",
+                f"按每片 {self.config.paddle.max_pages_per_task} 页切分为 {len(chunks)} 份，"
+                "并行解析、逐缝核对",
                 pages=profile.page_count,
                 parts=len(chunks),
             )
@@ -218,61 +222,113 @@ class Pipeline:
         self.run.counters["pdf"] = profile.to_dict()
         self.run.counters["chunks"] = [c.to_dict() for c in materialized]
 
-        client = MinerUClient(self.config.mineru, language=self.config.language)
-        files = [
-            BatchFile(
-                path=chunk.path,
-                data_id=chunk.chunk_id,
-                is_ocr=chunk.is_ocr,
-                page_ranges=chunk.page_ranges,
-            )
-            for chunk in materialized
-        ]
-        options = ParseOptions(
-            model_version=self.config.mineru.model_version,
-            language=self.config.language,
-            is_ocr=any(chunk.is_ocr for chunk in materialized),
-            enable_formula=self.config.mineru.enable_formula,
-            enable_table=self.config.mineru.enable_table,
-        )
+        client = PaddleClient(self.config.paddle)
 
-        batch_id = client.submit_local_batch(files, options)
-        results = client.wait_batch(batch_id, expected=len(files))
-        done, failed = classify_failures(results)
-        if failed:
-            self.alerts.error(
-                AlertCode.MINERU_FAILED,
-                f"{len(failed)} 个文件解析失败",
-                batch=batch_id,
-                failures=[{"file": r.file_name, "state": r.state, "error": r.err_msg} for r in failed[:5]],
-            )
-            raise MinerUError(
-                f"MinerU 解析失败（{len(failed)}/{len(results)} 个文件）",
-                detail={"failures": [r.file_name for r in failed]},
-            )
-
-        extracted: list[str] = []
-        for result in done:
-            chunk_id = result.data_id or Path(result.file_name).stem
-            destination = self.run.extracted_dir / chunk_id
-            if not (destination / ".extracted").is_file():
-                zip_path = client.download_zip(
-                    result.zip_url, self.run.zips_dir / f"{chunk_id}.zip"
-                )
-                load_bundle_after_extract(zip_path, destination)
+        # 断点续跑：已经归一落盘的分片不再重新提交，省额度也省时间
+        bundles: dict[str, Bundle] = {}
+        pending: list[Chunk] = []
+        for chunk in materialized:
+            destination = self.run.extracted_dir / chunk.chunk_id
+            if (destination / ".extracted").is_file():
+                bundles[chunk.chunk_id] = load_bundle(destination)
             else:
-                load_bundle(destination)
-            extracted.append(str(destination))
+                pending.append(chunk)
 
-        if not extracted:
-            raise MinerUError("MinerU 没有返回任何可用的解析结果")
+        reported: dict[str, int] = {}
+        if pending:
+            jobs: dict[str, str] = {}
+            for chunk in pending:
+                jobs[chunk.chunk_id] = client.submit_job(chunk.path, label=chunk.chunk_id)
+            self.run.jobs_path.parent.mkdir(parents=True, exist_ok=True)
+            self.run.jobs_path.write_text(
+                json.dumps({"jobs": jobs}, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
 
-        self.run.counters["mineru"] = {
-            "batch_id": batch_id,
+            # 全部先提交再逐个等：解析在服务端并行跑，客户端只负责轮询
+            failed: list[dict[str, str]] = []
+            outcomes: dict[str, JobOutcome] = {}
+            for chunk in pending:
+                outcome = client.wait_job(jobs[chunk.chunk_id], label=chunk.chunk_id)
+                if outcome.ok:
+                    outcomes[chunk.chunk_id] = outcome
+                else:
+                    failed.append(
+                        {"chunk": chunk.chunk_id, "job": outcome.job_id, "error": outcome.error}
+                    )
+            if failed:
+                self.alerts.error(
+                    AlertCode.PARSE_FAILED,
+                    f"{len(failed)} 个分片解析失败",
+                    jobs=jobs,
+                    failures=failed[:5],
+                )
+                raise ParseJobFailed(
+                    f"解析失败（{len(failed)}/{len(pending)} 个分片）",
+                    detail={"chunks": [f["chunk"] for f in failed]},
+                )
+
+            for chunk in pending:
+                outcome = outcomes[chunk.chunk_id]
+                destination = self.run.extracted_dir / chunk.chunk_id
+                bundles[chunk.chunk_id] = paddle.build_bundle(
+                    client.download_jsonl(outcome.json_url),
+                    destination,
+                    chunk_id=chunk.chunk_id,
+                )
+                if outcome.extracted_pages:
+                    reported[chunk.chunk_id] = int(outcome.extracted_pages)
+
+        ordered = [bundles[chunk.chunk_id] for chunk in materialized]
+        extracted = [str(self.run.extracted_dir / chunk.chunk_id) for chunk in materialized]
+
+        self.run.counters["parsing"] = {
+            "backend": "paddleocr-vl",
             "submitted": len(materialized),
             "extracted": extracted,
         }
+        self._audit_boundaries(profile, materialized, ordered, reported)
         return extracted
+
+    def _audit_boundaries(
+        self,
+        profile: PdfProfile,
+        chunks: list[Chunk],
+        bundles: list[Bundle],
+        reported: dict[str, int],
+    ) -> None:
+        """分片交界处校验：页数对账 + 接缝两页是否有正文。
+
+        切分是机械事，但"没丢页"必须是被检查过的结论——漏一页就是书里凭空少
+        一段，而且只出现在接缝上、静默无声。结论落成 ``parsing/boundary.md``，
+        校准工单会把接缝页列为必看。
+        """
+        audit = boundary.audit(
+            page_count=profile.page_count,
+            chunks=chunks,
+            bundles=bundles,
+            reported=reported,
+        )
+        self.run.counters["boundary"] = audit.to_dict()
+        self.run.boundary_path.parent.mkdir(parents=True, exist_ok=True)
+        self.run.boundary_path.write_text(
+            audit.to_markdown(self.run.input_pdf), encoding="utf-8"
+        )
+
+        if audit.issues:
+            self.alerts.warn(
+                AlertCode.BOUNDARY_CHECK,
+                f"交界处校验发现 {len(audit.issues)} 个问题（{audit.chunk_count} 片 / "
+                f"{len(audit.seams)} 道缝）",
+                report=str(self.run.boundary_path),
+                issues=audit.issues[:6],
+            )
+        else:
+            self.alerts.info(
+                AlertCode.BOUNDARY_CHECK,
+                f"交界处校验通过：{audit.chunk_count} 片 / {len(audit.seams)} 道缝，"
+                "页数对得上、接缝两页都有正文",
+                report=str(self.run.boundary_path),
+            )
 
     # ------------------------------------------------------------------
     # 阶段 2：calibrate（LLM 干活）
@@ -290,24 +346,37 @@ class Pipeline:
             alerts=self.alerts,
         )
         low_count = int(task.counts.get("low_segments", 0))
+        seam_count = int(task.counts.get("seams", 0))
         self.run.counters["calibrate"] = task.counts
 
         # LLM 的完成信号：source.md 被改过，或者显式声明"不用改"
         changed = self._source_changed()
         accepted = bool(self.run.counters.get("calibrate_accepted"))
 
-        # 没有什么低分段落时不要拿工单去烦 LLM——脚本能判断的部分就别打扰它
-        if not low_count and not changed and not accepted:
+        # 没有低分段、也没有接缝要核时，不要拿工单去烦 LLM——
+        # 脚本能判断的部分就别打扰它。有接缝就不能跳过：交界处核对是必做项。
+        if not low_count and not seam_count and not changed and not accepted:
             log.info("没有低置信度段落，自动跳过校准")
             self.alerts.info(
                 AlertCode.CALIBRATE_REQUIRED,
-                "MinerU 没有给出低置信度段落，已跳过校准",
+                "解析后端没有给出低置信度段落，也没有接缝要核对，已跳过校准",
                 report=str(task.report),
             )
             self.run.counters["calibrate_accepted"] = True
             return [str(self.run.calibrate_source)]
 
         if not changed and not accepted:
+            if low_count and seam_count:
+                message = (
+                    f"有 {low_count} 段低置信度内容，另有 {seam_count} 道分片接缝要核对"
+                )
+            elif seam_count:
+                message = (
+                    f"低置信度段落 0 条（本后端不输出置信度），"
+                    f"但交界处校验要求核对 {seam_count} 道接缝"
+                )
+            else:
+                message = f"有 {low_count} 段低置信度内容需要对照页面图校准"
             hint = (
                 "改完 calibrate/source.md 后重跑 `pdf2epub run`"
                 if pageimage.available()
@@ -315,13 +384,13 @@ class Pipeline:
             )
             self.alerts.warn(
                 AlertCode.CALIBRATE_REQUIRED,
-                f"有 {low_count} 段低置信度内容需要对照页面图校准",
+                message,
                 report=str(task.report),
                 source_md=str(self.run.calibrate_source),
                 pages=str(self.run.pages_dir),
                 next_step=hint,
             )
-            raise CalibrateRequired(f"等待校准：{low_count} 段低置信度内容", detail=task.to_dict())
+            raise CalibrateRequired(f"等待校准：{message}", detail=task.to_dict())
 
         log.info("校准阶段完成：%s", "工作稿被修改" if changed else "声明无需校准")
         return [str(self.run.calibrate_source)]
@@ -497,11 +566,3 @@ class Pipeline:
                 f"找不到任何解析产物：{self.run.extracted_dir}。请先跑通 prepare 阶段。"
             )
         return bundles
-
-
-def load_bundle_after_extract(zip_path: Path, dest_dir: Path) -> Bundle:
-    """解压并定位产物。"""
-    from .bundle import extract_zip
-
-    extract_zip(zip_path, dest_dir)
-    return load_bundle(dest_dir)

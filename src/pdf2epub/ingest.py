@@ -1,10 +1,12 @@
-"""输入处理：探测 PDF 特性、决定是否需要 OCR、按官方限制切分。
+"""输入处理：探测 PDF 特性、切分成分片。
 
 为什么需要这一步：
-- 官方 API 限制单文件 ≤200MB / ≤200 页，超限必须切分，否则整本书直接失败。
-- 扫描版必须开 OCR（``is_ocr=true``），否则解析结果为空。自动探测比让用户
-  自己判断可靠得多。
+- 解析按 ``max_pages_per_task``（默认 20 页）分片提交，一个分片一个 job：
+  小片并行整本书更快出结果；片与片的**接缝**也才核得过来（见 ``boundary.py``）。
+- 体积也一样按 ``max_bytes_per_task`` 切，超大扫描件一片就可能超限。
 - 切分后仍需把 chunk 内页号映射回原书页号，供复核时定位。
+- 顺带探测加密、文本层（供告警与统计），扫描版由 PaddleOCR-VL 自行识别，
+  这里不做开关。
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import MineruConfig
+from .config import PaddleConfig
 from .errors import InputError
 from .logutil import get_logger
 
@@ -37,23 +39,17 @@ SAMPLE_PAGES = 12
 
 @dataclass
 class Chunk:
-    """一个待提交给 MinerU 的子文件。"""
+    """一个待提交给解析后端的子文件。"""
 
     chunk_id: str
     path: Path
     page_start: int   # 0 基，含
     page_end: int     # 0 基，含
-    is_ocr: bool = False
     byte_size: int = 0
 
     @property
     def page_count(self) -> int:
         return self.page_end - self.page_start + 1
-
-    @property
-    def page_ranges(self) -> str:
-        """MinerU 的页码范围参数（1 基，闭区间）。"""
-        return f"{self.page_start + 1}-{self.page_end + 1}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,7 +58,6 @@ class Chunk:
             "page_start": self.page_start,
             "page_end": self.page_end,
             "page_count": self.page_count,
-            "is_ocr": self.is_ocr,
             "byte_size": self.byte_size,
         }
 
@@ -236,8 +231,13 @@ def _detect_text_layer(reader: "PdfReader", profile: PdfProfile, *, sample_pages
     profile.has_text_layer = profile.sampled_chars_per_page >= TEXT_LAYER_MIN_CHARS
 
 
-def plan_chunks(profile: PdfProfile, config: MineruConfig, *, language: str = "ch") -> list[Chunk]:
-    """按官方限制规划切分方案。未超限时返回单块。"""
+def plan_chunks(profile: PdfProfile, config: PaddleConfig) -> list[Chunk]:
+    """规划切分方案。未超限时返回单块。
+
+    片大小来自 ``max_pages_per_task``（默认 20）。片小不只是"显得细"：一个分片
+    一个解析 job，小片并行整体更快；片与片之间的**接缝**也才核对得过来
+    （见 ``boundary.py``）。
+    """
     max_pages = max(1, config.max_pages_per_task)
     max_bytes = max(1, config.max_bytes_per_task)
     total = profile.page_count
@@ -246,8 +246,19 @@ def plan_chunks(profile: PdfProfile, config: MineruConfig, *, language: str = "c
     by_bytes = math.ceil(profile.byte_size / max_bytes) if profile.byte_size else 1
     parts = max(1, by_pages, by_bytes)
 
+    # 一次 run 提交的 job 数量有上限：片切得太小会把额度刷爆。宁可让每片大一点。
+    max_files = max(1, config.max_files_per_batch)
+    if parts > max_files:
+        parts = max_files
+        log.warning(
+            "按 %d 页一片会切出 %d 个 job，超过单次上限（%d），改为 %d 页一片",
+            max_pages,
+            math.ceil(total / max_pages),
+            max_files,
+            math.ceil(total / parts),
+        )
+
     per_part = math.ceil(total / parts)
-    wants_ocr = _resolve_ocr(profile, config)
     chunks: list[Chunk] = []
     for index in range(parts):
         start = index * per_part
@@ -260,32 +271,50 @@ def plan_chunks(profile: PdfProfile, config: MineruConfig, *, language: str = "c
                 path=profile.path,  # 单块时直接复用原文件，不复制
                 page_start=start,
                 page_end=end,
-                is_ocr=wants_ocr,
                 byte_size=profile.byte_size,
             )
         )
 
     if parts > 1:
         log.info(
-            "PDF 超出单任务限制（%d 页 / %.1f MB），切分为 %d 份",
+            "按 %d 页一片切分为 %d 份（%d 页 / %.1f MB）",
+            max_pages,
+            len(chunks),
             total,
             profile.byte_size / 1e6,
-            len(chunks),
         )
     return chunks
 
 
-def _resolve_ocr(profile: PdfProfile, config: MineruConfig) -> bool:
-    """把 ``is_ocr = auto`` 解析成实际布尔值。"""
-    setting = config.is_ocr
-    if isinstance(setting, bool):
-        return setting
-    if setting == "true":
-        return True
-    if setting == "false":
-        return False
-    # auto：扫描版必开；有文本层则只在语言需要时开（这里保守地不开，加快速度）
-    return profile.is_scanned
+def chunk_filename(stem: str, chunk: Chunk) -> str:
+    """分片文件名：``<stem>.<chunk_id>.p0001-0020.pdf``（页码 1 基，原书页码）。"""
+    return f"{stem}.{chunk.chunk_id}.p{chunk.page_start + 1:04d}-{chunk.page_end + 1:04d}.pdf"
+
+
+def coverage_issues(chunks: list[Chunk], total: int) -> list[str]:
+    """分片计划本身是否无重、无漏、首尾相接。
+
+    切分是纯算术，不该出错；但"没出错"必须是**检查过**的结论，而不是假设——
+    漏掉一页就是书里凭空少一段，而且静默无声。
+    """
+    issues: list[str] = []
+    if not chunks:
+        return ["没有规划出任何分片"]
+    if chunks[0].page_start != 0:
+        issues.append(f"开头缺页：第 1-{chunks[0].page_start} 页没有被任何分片覆盖")
+    for previous, current in zip(chunks, chunks[1:]):
+        if current.page_start != previous.page_end + 1:
+            if current.page_start > previous.page_end + 1:
+                issues.append(
+                    f"分片之间缺页：第 {previous.page_end + 2}-{current.page_start} 页"
+                )
+            else:
+                issues.append(
+                    f"分片之间重叠：第 {current.page_start + 1}-{previous.page_end + 1} 页被切了两次"
+                )
+    if chunks[-1].page_end != total - 1:
+        issues.append(f"结尾缺页：第 {chunks[-1].page_end + 2}-{total} 页没有被任何分片覆盖")
+    return issues
 
 
 def materialize_chunks(
@@ -312,7 +341,9 @@ def materialize_chunks(
     reader = PdfReader(str(source))
     stem = Path(source).stem
     for chunk in chunks:
-        out_path = dest_dir / f"{stem}.{chunk.chunk_id}.pdf"
+        # 文件名里带原书页码范围：改了切分方案（比如 200 页一片改成 20 页一片）之后，
+        # 旧分片不会因为 chunk_id 撞名被当成新分片复用——那会静默解析出错误的页。
+        out_path = dest_dir / chunk_filename(stem, chunk)
         if out_path.is_file() and out_path.stat().st_size > 0:
             chunk.path = out_path
             chunk.byte_size = out_path.stat().st_size
@@ -336,7 +367,7 @@ def materialize_chunks(
     oversized = [c for c in chunks if c.byte_size > max_bytes]
     if oversized:
         log.warning(
-            "有 %d 个分片仍超出字节上限（%.1f MB > %.1f MB），MinerU 可能拒绝",
+            "有 %d 个分片仍超出字节上限（%.1f MB > %.1f MB），解析后端可能拒绝",
             len(oversized),
             max(c.byte_size for c in oversized) / 1e6,
             max_bytes / 1e6,

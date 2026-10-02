@@ -7,8 +7,8 @@
 
 它跟流水线自己的切分**不是一回事**：
 
-- 流水线的切分（``ingest.plan_chunks``）是机械的——只为绕过 MinerU 单任务
-  ≤200 页 / ≤200MB 的限制，**自动发生，不需要你插手**；切出来的分片带页码
+- 流水线的切分（``ingest.plan_chunks``）是机械的——按 ``max_pages_per_task``
+  （默认 20 页）切成小分片并行解析，**自动发生，不需要你插手**；切出来的分片带页码
   偏移，流水线保证你看到的是原书页码。
 - 这个脚本是给人看的顺手工：先 ``--list`` 看清章节边界和页数，据此决定
   分批的粒度；需要时把书落成小 PDF，单独处理某一章。
@@ -53,9 +53,9 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     sys.exit("需要 pypdf：pip install pypdf")
 
-#: MinerU 官方单任务页数上限。与 pdf2epub.toml 的 max_pages_per_task 保持一致，
-#: 只用于在 --list 里提示"流水线会切成几份"。
-MINERU_MAX_PAGES = 200
+#: 流水线每片页数。与 pdf2epub.toml 的 max_pages_per_task 保持一致，
+#: 只用于在 --list 里提示"解析会切成几片"。
+PIPELINE_CHUNK_PAGES = 20
 OUTLINE_TITLE_WIDTH = 48
 
 
@@ -362,12 +362,12 @@ def main() -> int:
     reader = open_reader(source)
     total = len(reader.pages)
     outline = read_outline(reader)
-    chunks = -(-total // MINERU_MAX_PAGES)
+    chunks = -(-total // PIPELINE_CHUNK_PAGES)
     print(f"· {source.name}：{total} 页 / {source.stat().st_size / 1e6:.1f} MB"
           f" / 书签 {len(outline)} 条")
     if chunks > 1:
-        print(f"· 超过 MinerU 单任务 {MINERU_MAX_PAGES} 页上限，流水线会自动切成 "
-              f"{chunks} 份并映射回原书页码，这一步不用你操心")
+        print(f"· 流水线按每片 {PIPELINE_CHUNK_PAGES} 页解析，会切成 {chunks} 片"
+              "并映射回原书页码，这一步不用你操心")
 
     if not (args.by_pages or args.ranges or args.by_chapters):
         print_outline(outline, args.level)

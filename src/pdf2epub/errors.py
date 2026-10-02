@@ -40,26 +40,26 @@ class InputError(Pdf2EpubError):
     code = "E_INPUT"
 
 
-class MinerUError(Pdf2EpubError):
-    """MinerU 调用链上的任何失败（鉴权、限流、服务端、超时）。"""
+class ParseError(Pdf2EpubError):
+    """解析后端调用链上的任何失败（鉴权、限流、服务端、超时）。"""
 
-    code = "E_MINERU"
-
-
-class MinerUAuthError(MinerUError):
-    code = "E_MINERU_AUTH"
+    code = "E_PARSE"
 
 
-class MinerURateLimitError(MinerUError):
-    code = "E_MINERU_RATELIMIT"
+class ParseAuthError(ParseError):
+    code = "E_PARSE_AUTH"
 
 
-class MinerUTaskFailed(MinerUError):
-    code = "E_MINERU_TASK"
+class ParseRateLimitError(ParseError):
+    code = "E_PARSE_RATELIMIT"
+
+
+class ParseJobFailed(ParseError):
+    code = "E_PARSE_JOB"
 
 
 class ArtifactError(Pdf2EpubError):
-    """MinerU 产物解压/读取失败。"""
+    """解析产物落盘/读取失败。"""
 
     code = "E_ARTIFACT"
 
