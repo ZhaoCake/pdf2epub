@@ -177,7 +177,9 @@ class Pipeline:
         self.run.counters["alerts"] = self.alerts.summary()
         self.run.save()
         self.alerts.flush()
-        if success:
+        # 只有真的出了 EPUB 才报 "转换完成"。`run --until prepare` 这类提前收尾
+        # 也会走到这里，那时候产物并不存在——报它完成是假话。
+        if success and self.run.output_epub().is_file():
             tail = "（有告警，请查阅）" if self.run.exit_code == 2 else ""
             self.alerts.info(
                 AlertCode.OUTPUT_READY,
