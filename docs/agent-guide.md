@@ -180,6 +180,15 @@ python scripts/compose_mathml.py --run <run 目录> \
 **书厚的不用死等它**：它会清空 `text/` 一次性重写，几百页的书按章分批手写更稳
 （见上面的「大书」）。
 
+如果这本书是 `#` 分章 + 有前置页，用 [`scripts/compose_book.py`](compose_book.py)：
+它不猜边界，读 `build/compose-plan.json`（撰写者写好的行区间、标题、目录层级），
+其余机械活照做（表格、插图、代码清单、印刷目录、多级导航锚点）。用法：
+
+```bash
+python scripts/compose_book.py --run .pdf2epub/runs/<id> --audit   # 先看审计，不写文件
+python scripts/compose_book.py --run .pdf2epub/runs/<id>           # 写章节 + book.json
+```
+
 它是示例脚本，不是流水线的一步——章节怎么切、标题叫什么，仍然由你定，
 也应该由你复核。脚本跑完**务必检查**：
 
@@ -278,6 +287,31 @@ pytest 默认只保留最近 3 次会话的 `pytest-N` 临时目录，**每次�
 
 所以 `tests/conftest.py` 覆盖了内置的 `tmp_path`：每个测试一个独享目录，但永不自动
 删除。跑测试不再产生任何删除，代价是临时目录要手动清。
+
+### 6. 撰写阶段的四个坑（386 页技术书实测）
+
+| 症状 | 原因 | 处理 |
+| --- | --- | --- |
+| EPUBCheck `RSC-005`：`value of attribute "width" is invalid; must be an integer` | 解析产物给的是 `<img width="79%">`，而 XHTML 的 `width` 只接受整数 | 百分比挪进 `style="width:79%"` |
+| MathML 产物 `xmlParseEntityRef: no name` | 公式里的 HTML 实体（`2&#x27;b00`）被 latex2mathml 当成数学字符，产出一个**裸 `&`** | 转换前把实体还原成原始字符 |
+| 产物 `error parsing attribute name` | `\text{,<register\_list>}` 里的 `<` 漏转义，产出 `<register_list>` 这种假标签 | 把"不在 MathML 标签表里的尖括号"转义掉 |
+| 一堆"MathML 结构不合法"，可手工试转又是好的 | 修复正则写成 `</?(?!(?:mi|mn|…)[\s/>])`：`/?` 会**回溯成空匹配**，于是合法的 `</mi>` 也被当成假标签转义掉，自制的"修复"反而制造出问题 | 开标签 `<(?!/)(?!…)` 与闭标签 `</(?!…\s*>)` 拆成两条规则 |
+
+还有一处只能靠上下文判断：`$` 既是数学定界符又是汇编寄存器前缀。只保护**确实**是
+寄存器的那几个写法（`$31`/`$k0`/`$k1`）；`$ 7+3=10 $ns` 里的 `$ns` 千万不能保护，
+否则数学被拆坏。
+
+### 7. 切章启发式只对 MinerU 产物有效，换后端就得自己给表
+
+`scripts/compose_mathml.py` 按"`## ` + 编号里有没有点"猜章（MinerU 的 markdown 层次）。
+PaddleOCR 产物完全不同：章是 `#`（`# Cache`、`# 寄存器重命名`），节是 `### 2.1`，
+小节 `#### 2.1.1`，另有 `### 1. 直接映射`、`## 方法一：停止执行` 这种层内序号；
+前置页（书名页 / 内容简介 / 版权 / 前言 / 印刷目录）要各自单独成页——这些**猜不出来**。
+
+结论："切章"该由撰写者给表，而不是让脚本猜：`scripts/compose_book.py` 读
+`build/compose-plan.json`（行区间 + 标题 + 目录层级）。两个必查项：
+**章首标题是否缺失或被拆成两行**（这本 11 章里有 3 章如此，"前言"整页没有标题），
+**印刷目录的页码是否还对着原书**。
 
 ---
 
