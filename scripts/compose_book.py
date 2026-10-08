@@ -81,6 +81,8 @@ PAGE = """<?xml version="1.0" encoding="utf-8"?>
 
 HEAD = re.compile(r"^(#{1,4})\s+(.*?)\s*$")
 IMG_DIV = re.compile(r"<div[^>]*>(\s*<img[^>]*/>\s*)</div>", re.S)
+#: Markdown 图：`![说明](images/xxx.png)`——校准阶段把读崩的表格/代码清单换成页面图时就是这么写的
+MD_IMG = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)$")
 CAPTION_DIV = re.compile(r"<div[^>]*>(.*?)</div>", re.S)
 TABLE = re.compile(r"<table.*?</table>", re.S)
 CELL = re.compile(r"(<td[^>]*>)(.*?)(</td>)", re.S)
@@ -97,6 +99,8 @@ CODE_LINE = re.compile(
 )
 ASM_LINE = re.compile(r"^\s*(?:[A-Z][A-Z0-9.]*\s+[Rr]\d|LDM|STM|[a-z]{2,6}\s+[A-Z]?\d+\b)")
 FIG_CAPTION = re.compile(r"^图\s*[\d.]+")
+#: 项目符号：中文书里常用方框 ☐ / □，也可能是 • · -
+BULLET = re.compile(r"^[•·\-☐□]\s*")
 TAB_CAPTION = re.compile(r"^表\s*[\d.]+")
 SUBCAPTION = re.compile(r"^[（(][a-zA-Z][）)]")
 TOC_LINE = re.compile(r"^(.*?)[\s.．]*?(\d{1,3})\s*$")
@@ -252,6 +256,18 @@ def latex_plain(latex: str) -> str:
         text = text.replace("\\" + char, char)
     text = re.sub(r"\\[a-zA-Z]+", " ", text)
     text = text.replace("~", " ").replace("&", "").replace("{", "").replace("}", "")
+    # 解析器常把标识符写成 ``\mathrm{f o r}``（逐字母加空格）：把这种"单字符 + 空格"的
+    # 串拼回去，否则代码清单看起来是 ``f o r (i=0; ...)``
+    text = re.sub(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z0-9] ){1,}[A-Za-z0-9](?![A-Za-z0-9])",
+        lambda m: m.group(0).replace(" ", ""),
+        text,
+    )
+    # ``x [i ] [j ]`` → ``x[i][j]``：只去掉紧贴括号内侧的空格
+    text = re.sub(r"\[\s+", "[", text)
+    text = re.sub(r"\s+\]", "]", text)
+    text = re.sub(r"\(\s+", "(", text)
+    text = re.sub(r"\s+\)", ")", text)
     text = re.sub(r"[ \t]{2,}", " ", text)
     return "\n".join(line.strip() for line in text.splitlines()).strip()
 
@@ -266,7 +282,8 @@ def heading_kind(title: str) -> int | None:
     """标题 → XHTML 级别。返回 None 表示这行其实是代码（例如 ``## BEQ LABEL1``）。"""
     if re.match(r"^[A-Z][A-Z0-9]{1,6}(\s|$)", title) and not re.search(r"[\u4e00-\u9fff]", title):
         return None  # 全大写助记符开头、又没中文：是汇编
-    numbered = re.match(r"^(\d+(?:\.\d+)*)[\s.、]", title)
+    # 附录用字母编号（``A.1``、``C.10``），和数字编号一样对待
+    numbered = re.match(r"^((?:\d+|[A-Z])(?:\.(?:\d+|\w+))*)[\s.、]", title)
     if numbered:
         dots = numbered.group(1).count(".")
         if dots == 1:
@@ -293,6 +310,18 @@ def render_blocks(blocks: list[str], *, prefix: str, audit: list[str]) -> tuple[
         index += 1
         counter += 1
         anchor = f"{prefix}-{counter}"
+
+        # Markdown 图（校准阶段把读崩的表/代码清单替换成的页面图）
+        markdown_img = MD_IMG.match(block)
+        if markdown_img:
+            alt = markdown_img.group(1) or "插图"
+            src = markdown_img.group(2)
+            if src.startswith("images/"):
+                src = "../" + src
+            out.append(
+                f'  <figure>\n    <img src="{escape(src)}" alt="{escape(alt)}"/>\n  </figure>'
+            )
+            continue
 
         # 独立公式
         if block.startswith("$$") and block.endswith("$$"):
@@ -345,12 +374,12 @@ def render_blocks(blocks: list[str], *, prefix: str, audit: list[str]) -> tuple[
             out.append(f'  <pre class="code">{joined}</pre>')
             continue
 
-        # 列表（项目符号）
-        bullet = [line for line in block.splitlines() if re.match(r"^[•·\-]\s+", line)]
+        # 列表（项目符号）。这本书的项目符号是 ☐ / □（原书方框），也一并认
+        bullet = [line for line in block.splitlines() if BULLET.match(line)]
         if bullet and len(bullet) == len([l for l in block.splitlines() if l.strip()]):
             out.append("  <ul>")
             for line in bullet:
-                out.append(f'    <li>{inline(re.sub(r"^[•·-]\s+", "", line))}</li>')
+                out.append(f'    <li>{inline(BULLET.sub("", line))}</li>')
             out.append("  </ul>")
             continue
 
@@ -414,12 +443,16 @@ def main() -> int:
         # 页面自己的标题从正文里摘掉，避免重复（原书章首标题有的带"第N章"、有的不带，
         # 第 11 章还被拆成了两行，都在这里吃掉）
         number = part.get("number")
+        # 正文里自己的标题（可能和计划的标题不完全一样，比如附录页只印"指令集基本原理"）
+        labels = {title, *(part.get("strip") or [])}
+        if number:
+            labels.add(f"第{number}章 {title}")
         while blocks:
             first = HEAD.match(blocks[0])
             if not first:
                 break
             text = first.group(2).strip()
-            if text == title or (number and text == f"第{number}章 {title}") or re.fullmatch(r"第\s*\d+\s*章", text):
+            if text in labels or re.fullmatch(r"第\s*\d+\s*章", text):
                 blocks = blocks[1:]
                 continue
             break

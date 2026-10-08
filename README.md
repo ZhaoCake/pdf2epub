@@ -1,316 +1,118 @@
+<div align="center">
+
+<img src="docs/assets/logo.png" width="140" alt="pdf2epub"/>
+
 # pdf2epub
 
-开发中……
+将 PDF（含扫描版）转换为 EPUB。
+**脚本负责机械性工作，内容判断与转写交给 LLM。**
 
-TODO
+解析引擎：[PaddleOCR-VL](https://github.com/PaddlePaddle/PaddleOCR)（云API令牌在百度 [AI Studio](https://aistudio.baidu.com/account/apikey) 获取，每日两万页免费）。
 
-- [x] 投入简单多个公式的pdf做测试
-- [x] 投入一本较大扫描pdf做测试
-- [x] 添加paddleocr做第二个转换选择或做交叉验证
-- [ ] 本人正在阅读转换后的《超标量处理器设计全书》
-- [ ] 转换更加伊拉克成色的扫描版《量化研究方法》中文第五版
+</div>
 
----
+## 背景
 
-把 PDF（含扫描版）转成 EPUB。
+PDF 的版式为纸面印刷而设计，在小屏幕电纸书（6~7 英寸墨水屏）上阅读体验较差：
+字号偏小、版面拥挤、无法随阅读器设置重排；大屏设备虽可阅读，但便携性不足。
+EPUB 作为重排格式，更适合小屏阅读设备。因此一条自然的路径是：
+**使用 OCR 模型识别 PDF，由 LLM 校准识别结果，再转换为 EPUB。**
 
-这个项目的前提很简单：**脚本不该去猜内容**。
+本项目是这条链路的完整实现。其中"识别 → 校准 → 转写 → 校验"的流程不绑定目标格式，
+其他"将 PDF 转换为其他格式"的需求同样适用。
 
-解析后端（PaddleOCR-VL）再好，也总有没把握的段落（形近字、串列、公式符号）。判断这些
-地方对不对，需要看原页面、理解上下文——这是 LLM 的活。把内容转写成 EPUB 的章节结构
-同样是 LLM 的活。脚本该干的是搬运、截图、打包、校验这些机械事。
+## 实际效果
 
-所以这里**没有** Markdown→XHTML 转换器，没有章节切分启发式，没有元数据推断，
-没有确定性修复引擎。写那些代码的回报远不如把话语权交给 LLM。
+以《计算机体系结构：量化研究方法（第五版）》612 页扫描版为例：原书为整页扫描图像、
+无文本层，包含大量跨页表格与公式。前两图为原书扫描页，下图为同一内容转换后在
+阅读器中的效果（全书分 31 片解析，成品通过 EPUBCheck 校验，0 错误）：
 
----
+<p align="center">
+  <img src="docs/assets/lhyjff_pdf1.png" width="30%" alt="原书扫描页：表 3-4 与 3.5.1 节"/>
+  &nbsp;
+  <img src="docs/assets/lhyjff_pdf2.png" width="30%" alt="原书扫描页：表 3-5"/>
+  <br/>
+  <img src="docs/assets/lhyjff_epub.png" width="66%" alt="转换后在阅读器中的效果"/>
+</p>
 
-## 四个阶段
+说明：EPUB 中**部分表格以图片形式呈现**，这是有意的设计——对于难以可靠识别的表格
+（列数多、结构错位、单元格含公式），要求 LLM 不强行转换为 HTML，而是直接从原书
+截取图像插入，以保证内容不失真；其余表格仍保留为可搜索、可重排的普通表格。
 
-| 阶段 | 谁干活 | 产出 |
-| --- | --- | --- |
-| `prepare` | 脚本 | 切分 PDF → PaddleOCR 解析 → 产物归一 + 交界处校验 |
-| `calibrate` | **LLM** | 对着页面图校准低分段落，直接编辑 `calibrate/source.md` |
-| `compose` | **LLM** | 直接写 `build/book.json` 与 `build/OEBPS/text/*.xhtml` |
-| `check` | 脚本 | 生成 OPF/nav/container → 打包 → 自检 + EPUBCheck → 出报告 |
+## 快速开始
 
-脚本只做搬运、截图、打包、报告。**判断和转写全部交给 LLM。**
-
-> 要真正跑一轮、或者你就是那个被停下来干活的 Agent，
-> 看 [`docs/agent-guide.md`](docs/agent-guide.md)：三个关卡上具体该怎么干，
-> 以及已经踩过的坑。
-
----
-
-## 使用
-
-直接把仓库地址扔给AI Agent使用，下面基本不用看。
+推荐的使用方式是**将仓库提供给 AI Agent**，由其按照
+[docs/agent-guide.md](docs/agent-guide.md) 执行。以下是基本流程：
 
 ```bash
-pip install -e ".[render]"     # render 提供页面渲染，强烈建议装
+pip install -e ".[render]"       # render 提供页面渲染，建议安装
+export PADDLE_TOKEN=...          # 或写入 .env
 
-export PADDLE_TOKEN=...        # 或写进 pdf2epub.toml
-
-pdf2epub doctor                 # 环境自检
+pdf2epub doctor                  # 环境自检
 pdf2epub init book.pdf
 pdf2epub run
 ```
 
-`run` 会在需要 LLM 时停下，并以**退出码 3** 结束：
+`run` 不会一次性执行完毕：流程推进到需要内容判断的环节时会**暂停并输出工单**
+（退出码 3），按照工单完成相应工作后重新执行 `run`，直至退出码为 0：
 
-```
-$ pdf2epub run
-...
-轮到你了：校准
-------------------------------------------------
-  工单：    .pdf2epub/runs/<id>/calibrate/report.md
-  要改的：  .pdf2epub/runs/<id>/calibrate/source.md
-  页面图：  .pdf2epub/runs/<id>/calibrate/pages
+```text
+pdf2epub run    # → 3  停在校准阶段：对照 pages/*.png 修正解析错误
+pdf2epub run    # → 3  停在撰写阶段：编写 build/book.json 与 OEBPS/text/*.xhtml
+pdf2epub run    # → 0  打包并通过 EPUBCheck，产物输出至 output/<name>.epub
 ```
 
-于是循环变成：
-
-```bash
-pdf2epub run                    # → 3，停在校准
-pdf2epub show calibrate         # 读工单
-#  对着 pages/page-0007.png 把 source.md 里认错的地方改对
-pdf2epub run                    # → 3，停在撰写
-pdf2epub show compose           # 读撰写说明
-#  写 build/book.json 与 build/OEBPS/text/*.xhtml
-pdf2epub run                    # → 0，打包 + 校验通过，出书
-```
-
-每一步都可以反复跑：已完成的阶段不会重来，做得不对的阶段会重新派工单。
+已完成的阶段不会重复执行；未通过的阶段会重新生成工单。
 
 ### 退出码
 
 | 码 | 含义 |
 | --- | --- |
 | 0 | 成功，产物通过校验 |
-| 1 | 失败，看 `pdf2epub alerts` |
-| 2 | 跑完了但有告警（含"已接受不合格产物"） |
-| 3 | **轮到 LLM 了**，按工单干活后重跑 `run` |
+| 1 | 失败，详见 `pdf2epub alerts` |
+| 2 | 执行完毕但存在告警（包括"已接受不合格产物"） |
+| 3 | **等待 LLM 处理**，按工单完成后重新执行 `run` |
 
-退出码只看**这一次运行**产生的告警，不会因为历史告警把一次干净的收尾变成 2。
+## 工作方式
 
-### 命令
+| 阶段 | 执行者 | 产出 |
+| --- | --- | --- |
+| `prepare` | 脚本 | 切分 PDF → PaddleOCR-VL 解析 → 产物归一化 + 交界处校验 |
+| `calibrate` | **LLM** | 对照页面图校准解析结果，直接编辑 `calibrate/source.md` |
+| `compose` | **LLM** | 直接编写 `build/book.json` 与 `build/OEBPS/text/*.xhtml` |
+| `check` | 脚本 | 生成 OPF/nav/container → 打包 → 自检 + EPUBCheck → 报告 |
 
-| 命令 | 用途 |
-| --- | --- |
-| `init <pdf>` | 登记一个 PDF，创建运行 |
-| `run` | 跑流水线；需要 LLM 时停下并给出工单 |
-| `done [calibrate\|compose]` | 表态"这一步干完了"（校准阶段也可用它跳过） |
-| `show <calibrate\|compose\|check>` | 直接打印工单，省得去翻文件路径 |
-| `status` | 现在停在哪、下一步干嘛 |
-| `list` | 有哪些运行 |
-| `alerts` | 告警历史 |
-| `doctor` | 环境自检 |
-| `clean` | 删运行记录 |
+设计动机：无论解析后端能力多强，总存在没有把握的段落（形近字、串列、公式符号）。
+判断这些内容是否正确需要查看原始页面、理解上下文，这属于 LLM 的工作。
+因此本项目**没有**引入 Markdown→XHTML 转换器、章节切分启发式、元数据推断或
+确定性修复引擎；脚本只保证三件事：搬运准确、定位精确、**不将不合格产物静默标记为成功**。
 
-加 `--json` 拿到机器可读输出；加 `--accept` 接受一份不合格的产物收尾（会留下告警）。
-
----
-
-## 校准阶段：脚本给 LLM 看什么
-
-解析按 **20 页一片**提交（`paddle.max_pages_per_task`）：小片并行更快，接缝也才
-核得过来。prepare 收尾会做**交界处校验**——分片首尾相接不重不漏、每片产物页数 == 计划
-页数、每道缝的两页有没有解析出正文——结论写在 `parsing/boundary.md`，有问题发
-`BOUNDARY_CHECK` 告警。接缝那两页会被渲染成页面图，在校准工单里列为必做核对项。
-
-PaddleOCR-VL 不输出逐段置信度，所以低分清单通常为空，校准的**重点就是接缝核对**；
-工单的抽取逻辑仍兼容带分数的产物（`content_list` 优先，缺分数就用 `model.json`
-的版面框按 IoU 配对），低于 `calibrate.score_threshold` 的进工单：
-
-```
-.calibrate/
-├── report.md          ← 工单：哪些段落、哪一页、原文是什么、上下文长什么样
-├── segments.json      ← 机器可读的同一份清单
-├── source.md          ← ★ LLM 直接编辑这个
-├── pages/page-0007.png ← 相关页截图（含前后各一页的上下文）
-└── images/            ← 解析抽出的图，供对照
-```
-
-报告里写死了几条规矩：只改识别错的地方、不要重写文案、看图确认没认错的就保持原样、
-实在认不出的写进 `notes.md` 而不是硬猜。
-
-没有低分段落时不会拿工单去烦 LLM，直接进入下一阶段。
-
----
-
-## 撰写阶段：LLM 直接写 EPUB
-
-脚本准备好材料，剩下全是 LLM 的事：
-
-```
-build/
-├── BRIEF.md                  ← 撰写说明
-├── book.json                 ← ★ 书目 + 阅读顺序
-└── OEBPS/
-    ├── text/*.xhtml          ← ★ 章节正文
-    ├── images/               ← 脚本已搬好的图
-    └── style/base.css        ← 样式
-```
-
-章节 XHTML 只有三条硬要求：良构 XML、根元素带 XHTML 命名空间、`<head><title>` 与
-`<body>` 齐全。**`content.opf` / `nav.xhtml` / `META-INF/container.xml` 不用 LLM 管**——
-打包时脚本从 `book.json` 与目录扫描生成。zip 结构、mimetype、media-type 同理。
-
-`book.json` 里不确定的字段留空即可，脚本不因为空值报错。
-
----
-
-## 校验阶段：只报告，不修复
-
-脚本跑自检 + EPUBCheck，把结果写成 `check/report.md`：
-
-```markdown
-### `OEBPS/text/ch003.xhtml`
-
-**RSC-007** (ERROR) — `OEBPS/text/ch003.xhtml:42`
-
-引用的资源不存在：../images/fig-12.png
-
-```text
-    39 |     <p>如下图：</p>
-    40 |     <figure>
->>  42 |       <img src="../images/fig-12.png" alt="图 12"/>
-    43 |       <figcaption>图 12　系统架构</figcaption>
-```
-
-改完再跑一次 `pdf2epub run` 即可。
-
-**这里只有报告，没有修复器。** 改文本是 LLM 的事——脚本定位得准就够了。
-包内文件层面的问题（`nav` 书签指向非 spine 项、`identifier` 不是合法 UUID）由脚本
-自己保证，不该让 LLM 操心。
-
-确实改不动的，用 `pdf2epub done --accept` 收尾：产物照样保留，同时留下明确告警，
-**绝不静默当成功**。
-
----
-
-## 运行目录
-
-```
-.pdf2epub/runs/<run_id>/
-├── run.json               # 状态机，断点续跑的真相源
-├── input.pdf              # 输入副本
-├── logs/pipeline.jsonl
-├── alerts.json            # 告警历史（同一条告警只累计次数，不刷屏）
-├── parsing/
-│   ├── jobs.json          # 提交给解析后端的 job 清单
-│   ├── boundary.md        # 交界处校验：每片页数对账 + 接缝清单
-│   └── extracted/         # 归一后的产物，原样保留
-├── calibrate/             # 校准工单 + 可编辑工作稿 + 页面图
-├── build/                 # LLM 写的 EPUB 内容 + 脚本生成的包内文件
-├── check/                 # 校验报告
-└── output/<name>.epub
-```
-
----
+各关卡的具体操作方式与已知问题：**[docs/agent-guide.md](docs/agent-guide.md)**（必读）。
 
 ## 配置
 
-优先级（后者覆盖前者）：
+配置优先级：`内置默认 < .env < pdf2epub.toml < 环境变量 < 命令行`。
 
-```
-内置默认值 < .env < pdf2epub.toml < 真实环境变量 < 命令行覆盖
-```
-
-`.env` 放在当前工作目录（项目根），专门用来放密钥，**会被自动加载**：
-
-```ini
-PADDLE_TOKEN=...
-```
-
-它只补空缺：已经有同名环境变量时不覆盖，所以临时
-`$env:PADDLE_TOKEN=...` 依然优先。值按字面使用，不做 `%TEMP%` 之类的变量展开。
-
-其余配置写在 `pdf2epub.toml`，也能用 `PDF2EPUB__SECTION__KEY` 形式的环境变量覆盖
-（如 `PDF2EPUB__CALIBRATE__SCORE_THRESHOLD=0.8`）。完整清单见仓库里的
-[`pdf2epub.toml`](pdf2epub.toml)，常用的几个：
-
-```toml
-[paddle]
-token_env = "PADDLE_TOKEN"     # Token 从哪个环境变量读
-model = "PaddleOCR-VL-1.6"
-max_pages_per_task = 20        # 每片页数：片小则并行快，接缝也核得过来
-
-[calibrate]
-score_threshold = 0.75         # 低于此置信度的段落进校准清单
-render_dpi = 140               # 页面图清晰度
-
-[validate]
-fail_on_severity = "ERROR"     # FATAL | ERROR | WARNING
-epubcheck_mode = "auto"        # auto | require | off
-```
-
----
+- 解析服务 Token 写入 `.env`：`PADDLE_TOKEN=...`
+- 其余选项见 [`pdf2epub.toml`](pdf2epub.toml) 内注释，可通过 `PDF2EPUB__SECTION__KEY`
+  形式的环境变量覆盖
 
 ## 环境要求
 
-- Python 3.10+
-- PaddleOCR Token（AI Studio 承载的 PaddleOCR-VL）：在 AI Studio 创建，写进 `.env`
-- **页面渲染**（`pypdfium2` + `Pillow`）：装了才能做多模态校准；不装会退化成
-  纯文本校准并告警
-- **EPUBCheck**（需要 Java）：<https://github.com/w3c/epubcheck/releases>
-- **`latex2mathml`**（可选，撰写阶段用）：`pip install latex2mathml`。
-  只有在用 [`scripts/compose_mathml.py`](scripts/compose_mathml.py) 把公式转
-  MathML 时才需要，流水线本身不依赖它
+- Python 3.10+；PaddleOCR Token（在 AI Studio 创建）
+- 页面渲染依赖 `pypdfium2` + `Pillow`（即 `[render]` extra；未安装时将退化为
+  纯文本校准并产生告警）
+- EPUBCheck（依赖 Java）：将 jar 解压至 `tools/` 目录即可被自动发现，或通过
+  `EPUBCHECK_JAR` 指定路径；未安装时仍可运行，但仅保留自检并明确告警
 
-EPUBCheck 不需要配环境变量——解压到 `tools/` 下就会被自动发现：
-
-```
-tools/epubcheck-5.1.0/epubcheck.jar
-```
-
-也可以放别处用 `EPUBCHECK_JAR` 指路。没装也能跑，只剩自检这一道，并且会明确告警
-（`check.json` 里 `epubcheck_ran: false`），不会把"只跑了一道"说成"跑过了"。
-
-`pdf2epub doctor` 会把这几项逐条查一遍。
-
----
+`pdf2epub doctor` 可逐项检查上述依赖。
 
 ## 开发
 
 ```bash
 pip install -e ".[render,dev]"
-pytest
+pytest        # 基于伪造解析产物跑通全链路，无需联网与 Token
 ```
 
-测试用伪造的解析产物跑通整条链路，不需要联网、不需要 Token。
-
-测试的临时目录在系统临时目录下的 `pdf2epub-tests-<pid>/`，**跑完不自动清理**（见
-`tests/conftest.py` 里覆盖 `tmp_path` 的原因）。看过结果后自己删掉即可。
-
-### 代码地图
-
-```
-src/pdf2epub/
-├── cli.py           命令行
-├── pipeline.py      四阶段调度与"谁来干活"的边界
-├── paddle.py        PaddleOCR 客户端 + JSONL -> bundle 产物归一
-├── ingest.py        PDF 剖析与切分（每片 20 页）
-├── boundary.py      分片交界处校验（每片页数对账 + 接缝清单）
-├── bundle.py        产物解压与定位（不做任何加工）
-├── segments.py      从产物里抽出带置信度的段落
-├── tasks.py         给 LLM 的两个工单
-├── pageimage.py     PDF 页 -> 图片
-├── epubpack.py      book.json + 目录树 -> OPF/nav/container -> zip
-├── formatcheck.py   自检 + EPUBCheck + 校验报告
-├── selflint.py      EPUB 结构自检
-├── epubcheck.py     外部 EPUBCheck 调用
-├── runstate.py      运行状态与断点续跑
-└── alerts.py        告警出口
-
-scripts/
-├── compose_mathml.py  示例：把 source.md 写成章节（公式转 MathML）
-└── split_pdf.py       顺手工具：按页码 / 页段 / 章节拆分 PDF，供分批干活
-
-docs/
-└── agent-guide.md     三个关卡上具体怎么干活 + 踩过的坑
-```
-
-`scripts/` 里的东西**不是流水线的一部分**，是顺手工具。流水线坚持"撰写是 LLM
-的活"，所以那里没有 Markdown→XHTML 转换器；但把机械部分固化下来能省掉每次手敲
-几万字，也避免重新踩 `\binom` 那个坑。
+常用命令：`init / run / done / show / status / list / alerts / doctor / clean`，
+加 `--json` 获取机器可读输出。

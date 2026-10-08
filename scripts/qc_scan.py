@@ -5,14 +5,18 @@
 "该看哪里"这件事脚本不给任何线索。实测（见 docs/agent-guide.md）真正有效的是
 **先按模式全局搜一遍，再对可疑处看图确认**——而不是从第 1 页硬啃到第 351 页。
 
-它做四件事：
+它做六件事：
 
 1. **页级索引**：产出 ``<run>/calibrate/source_paged.md``，在正文里插入
    ``<!-- 第 N 页 -->`` 标记（原书页码），供人按页定位；``source.md`` 本身
    保持干净（它是流水线的输入，不要塞标记进去）。
 2. **结构异常**：极短页、超长页、相邻页高度雷同（扫描透印/复读）。
-3. **跨页断句**：左页末字符不是终止标点、右页首字符是正文 —— 跨页被切断的候选。
-4. **模式命中**：定界符失配、裸 LaTeX 记号、幻觉关键词、坏字形、常见混淆。
+3. **重复内容**：整段逐字复读（幻觉的典型特征）；相邻页去标签后大段逐字相同
+   （"跨页扫再切开"的扫描把上一页的尾巴又印了一遍）。
+4. **跨页断句**：左页末字符不是终止标点、右页首字符是正文 —— 跨页被切断的候选。
+5. **页码混入正文**："跨页扫再切开"时页边页码方框会被整页模型顺着读进句子
+   （如 ``另58一个``）；中文之间夹 1~3 位数字且不是量词/编号语境的列出来对图确认。
+6. **模式命中**：定界符失配、裸 LaTeX 记号、幻觉关键词、坏字形、常见混淆。
 
 结论写成 ``<run>/calibrate/qc-report.md``；每条命中都给页码，便于直接对照
 ``pages/page-NNNN.png`` 看图（没渲染的页用 ``--render`` 补渲染）。
@@ -28,6 +32,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 import sys
@@ -95,6 +100,40 @@ LATIN_NOISE = re.compile(r"[\u4e00-\u9fff]\s+o\s+[\u4e00-\u9fff]")
 DOUBLE_AMP = re.compile(r"&amp;&amp;")
 BROKEN_GLYPH = re.compile(r"[\u25a1\ufffd]")
 
+#: 页边页码方框被读进正文的样子：中文/中文标点之间夹 1~3 位数字（无空格）。
+STAMP = re.compile(r"(?<=[\u4e00-\u9fff。，、；：？！）】”])(\d{1,3})(?=[\u4e00-\u9fff（【“])")
+#: 数字前面是这些字，说明是正常语义里的数量/编号，不算页码
+NOT_PAGENUM_BEFORE = set(
+    "第共约近超达至了于和与及等该这此其每余前后左右年月日时分秒版次章节点页个条"
+    "件项类种代期层位名分数值比中上下不的之与图表格有為为是在要需能可占到从由多小大"
+)
+#: 数字后面接这些单位/量词，同样不算页码
+NOT_PAGENUM_AFTER = (
+    "美元", "元", "瓦", "天", "倍", "个", "种", "世纪", "年", "月", "日", "字节", "位", "行", "列",
+    "块", "级", "条", "页", "秒", "小时", "分钟", "纳秒", "毫秒", "微秒", "纳米", "平方", "次", "项",
+    "GHz", "MHz", "Hz", "KB", "MB", "GB", "TB", "nm", "bit", "ms", "ns", "cm", "mm", "%", "％", "℃",
+)
+#: 页码量级上限（按书调整；只是"值得看一眼"的初筛）
+MAX_PAGE_NO = 999
+
+#: 去标签 + 压空白：相邻页大段重复要按"眼睛看到的文本"比，表格样板不算
+TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", " ", TAG_RE.sub("", text)).strip()
+
+
+def _is_stamp(text: str, match: re.Match) -> bool:
+    value = match.group(1)
+    if text[match.start() - 1] in NOT_PAGENUM_BEFORE:
+        return False
+    if text[match.end() : match.end() + 2].startswith(NOT_PAGENUM_AFTER):
+        return False
+    if len(value) == 3 and value[0] == "0":
+        return False
+    return int(value) <= MAX_PAGE_NO
+
 
 def detectors(pages: list[Page]) -> dict[str, list[str]]:
     findings: dict[str, list[str]] = defaultdict(list)
@@ -118,7 +157,27 @@ def detectors(pages: list[Page]) -> dict[str, list[str]]:
         if a[:80] == b[:80]:
             findings["相邻页雷同"].append(f"第 {left.number}/{right.number} 页开头 80 字相同")
 
-    # ---- 3. 段落复读（**整段**逐字重复才算数，幻觉的典型特征） ----
+    # ---- 3. 相邻页大段重复（扫描"跨页扫再切开"把上一页尾巴又印一遍） ----
+    # 去标签再比：表格里 <td style=...> 这类样板会互相命中，制造满屏假重复；
+    # 每对页只报最大的重复块，且要求重复里有实词（纯数字/符号的雷同多为页眉页脚）。
+    for left, right in zip(order, order[1:]):
+        if right.number != left.number + 1:
+            continue
+        a, b = _plain(left.text)[-2000:], _plain(right.text)[:4000]
+        if len(a) < 120 or len(b) < 120:
+            continue
+        matcher = difflib.SequenceMatcher(None, a, b, autojunk=False)
+        block = max(matcher.get_matching_blocks(), key=lambda blk: blk.size)
+        if block.size < 120:
+            continue
+        frag = a[block.a : block.a + block.size]
+        if len(re.findall(r"[\u4e00-\u9fff]", frag)) + len(frag) // 2 < 40:
+            continue
+        findings["相邻页大段重复"].append(
+            f"第 {left.number} → {right.number} 页：{block.size} 字相同「{frag[:60]}…」"
+        )
+
+    # ---- 4. 段落复读（**整段**逐字重复才算数，幻觉的典型特征） ----
     # 只比前缀会误报：同一页里几句都以同一个长公式开头，前缀一样、后面并不一样。
     seen: Counter[str] = Counter()
     where: dict[str, list[int]] = defaultdict(list)
@@ -134,7 +193,16 @@ def detectors(pages: list[Page]) -> dict[str, list[str]]:
             pages_hit = "、".join(str(n) for n in where[key])
             findings["段落复读"].append(f"出现 {count} 次（第 {pages_hit} 页）：{key[:60]}…")
 
-    # ---- 4. 跨页断句 ----
+    # ---- 5. 页码混入正文（页边页码方框被整页模型顺着读进句子） ----
+    for page in pages:
+        for match in STAMP.finditer(page.text):
+            if not _is_stamp(page.text, match):
+                continue
+            findings["页码混入正文"].append(
+                f"第 {page.number} 页 [{match.group(1)}]：…{_context(page.text, match.start(), 26)}…"
+            )
+
+    # ---- 6. 跨页断句 ----
     for left, right in zip(order, order[1:]):
         if right.number != left.number + 1:
             continue
@@ -152,7 +220,7 @@ def detectors(pages: list[Page]) -> dict[str, list[str]]:
             f"第 {left.number} → {right.number} 页：左尾「…{tail[-18:]}」 / 右首「{head[:18]}…」"
         )
 
-    # ---- 5. 定界符失配（行内公式 $ 个数为奇数） ----
+    # ---- 7. 定界符失配（行内公式 $ 个数为奇数） ----
     for page in pages:
         for index, line in enumerate(page.text.splitlines(), 1):
             stripped = line.strip()
@@ -161,7 +229,7 @@ def detectors(pages: list[Page]) -> dict[str, list[str]]:
             if stripped.count("$") % 2:
                 findings["定界符失配"].append(f"第 {page.number} 页第 {index} 行（$ 计数为奇数）：{stripped[:70]}")
 
-    # ---- 6. 裸 LaTeX / 坏字形 / 混淆 ----
+    # ---- 8. 裸 LaTeX / 坏字形 / 混淆 ----
     # 裸 LaTeX = 定界符没跟上，公式体漏进了正文。这才是这份产物里最该找的东西：
     # 形如 `x=x_{2}，左侧单调递减`、`设 ，则 \lim_{x\to…}`（连定界符和公式一起丢）。
     for page in pages:
@@ -175,7 +243,7 @@ def detectors(pages: list[Page]) -> dict[str, list[str]]:
         for match in LATIN_NOISE.finditer(page.text):
             findings["中文里的孤立 o"].append(f"第 {page.number} 页：…{_context(page.text, match.start())}…")
 
-    # ---- 7. 幻觉关键词 ----
+    # ---- 9. 幻觉关键词 ----
     for pattern in HALLUCINATION_HINTS:
         regex = re.compile(pattern)
         for page in pages:
