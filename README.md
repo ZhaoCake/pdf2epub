@@ -45,8 +45,21 @@ EPUB 作为重排格式，更适合小屏阅读设备。因此一条自然的路
 
 ## 快速开始
 
-推荐的使用方式是**将仓库提供给 AI Agent**，由其按照
-[docs/agent-guide.md](docs/agent-guide.md) 执行。以下是基本流程：
+两种用法等价：
+
+- **作为 Agent Skill 安装**（Claude Code、CodeBuddy 等支持 Agent Skills 的
+  环境；需先将本仓库推送到 GitHub）：
+
+  ```bash
+  npx skills add zhaocake/pdf2epub
+  ```
+
+  也可手动 clone 到 agent 的 skills 目录（如 `~/.claude/skills/pdf2epub`）。
+- **直接把仓库提供给 AI Agent**：agent 读根目录 [SKILL.md](SKILL.md) 按流程
+  驱动；详细操作知识在 [references/](references/)（按关卡拆分的四份手册），
+  供人阅读。
+
+以下是基本流程：
 
 ```bash
 pip install -e ".[render]"       # render 提供页面渲染，建议安装
@@ -91,7 +104,8 @@ pdf2epub run    # → 0  打包并通过 EPUBCheck，产物输出至 output/<nam
 因此本项目**没有**引入 Markdown→XHTML 转换器、章节切分启发式、元数据推断或
 确定性修复引擎；脚本只保证三件事：搬运准确、定位精确、**不将不合格产物静默标记为成功**。
 
-各关卡的具体操作方式与已知问题：**[docs/agent-guide.md](docs/agent-guide.md)**（必读）。
+各关卡的具体操作方式与已知问题：**[references/](references/)**
+（calibration / composition / validation / pitfalls，按关卡加载，必读）。
 
 ## 配置
 
