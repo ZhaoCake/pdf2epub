@@ -172,7 +172,9 @@ def inline(text: str) -> str:
             mathml(part, display="inline") if index % 2 else escape(part)
             for index, part in enumerate(parts)
         )
-    return _restore_tags(out, stash).replace(REG, "$")
+    # ``\_`` 是解析器给下划线加的 LaTeX 转义：正文里应显示成 ``_``，
+    # MathML 的 ``<mtext>`` 里 latex2mathml 也原样留着，一起还原。
+    return _restore_tags(out, stash).replace(REG, "$").replace("\\_", "_")
 
 
 def inline_keep_html(text: str) -> str:
@@ -370,7 +372,7 @@ def render_blocks(blocks: list[str], *, prefix: str, audit: list[str]) -> tuple[
 
         # 代码块：不转数学（代码里的 $ 不一定是公式），只转义
         if is_code(block):
-            joined = "\n".join(escape(line) for line in block.splitlines())
+            joined = "\n".join(escape(line).replace("\\_", "_") for line in block.splitlines())
             out.append(f'  <pre class="code">{joined}</pre>')
             continue
 

@@ -28,6 +28,13 @@ python scripts/compose_mathml.py --run <run 目录> \
 右对齐、转义、`book.json`。**需要 `pip install latex2mathml`。**
 注意它会清空 `text/` 一次性重写——长书按章分批手写更稳。
 
+切章草稿可以先让脚本打：`python scripts/plan_from_outline.py --run <id>`——
+它按 PDF **书签**的顶层条目去 `source.md` 里找对应标题，给出每章的
+`start/end` 行号与文件名。**草稿只解决"边界"，两件事仍要人工定**：
+
+- 前置页怎么切（书名页 / 致谢 / 简明目录 / 详细目录 / 图表清单各自成页）；
+- 书签里没有的页面（索引、参考书目、没进书签的附录）要手工补 `part`。
+
 按 `#` 分章、有前置页（书名页/版权/前言/印刷目录）的书，使用
 [`scripts/compose_book.py`](../scripts/compose_book.py)：它不猜测边界，读取
 `build/compose-plan.json`（撰写者写好的行区间、标题、目录层级），其余机械
@@ -66,3 +73,7 @@ python scripts/compose_book.py --run .pdf2epub/runs/<id>           # 写章节 +
   替换为 `<img>`，**表题保留为正文**（可搜索）。
 - 单元格内的字面 `\n` 转成 `<br/>`。
 - 校准 `notes.md` 里的存疑项（认不出、原书笔误）保持原样，不要"顺手修正"。
+- 非中文书：`part` 里**不要写 `number`**（写了会拼成"第N章"），标题用书签原文；
+  正文与 `<mtext>` 里的 `\_` 由脚本统一还原成 `_`（解析器给下划线加的 LaTeX 转义）。
+- 交付前跑一次 `--audit`：它会点名"公式其实是汇编清单"这类块（第 22 条高频问题），
+  这类块要按页面图还原成代码，不要等 EPUBCheck 报错才发现。

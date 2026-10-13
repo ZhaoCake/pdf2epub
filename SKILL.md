@@ -51,7 +51,7 @@ pdf2epub run
 
 | 停留位置 | 加载 | 干什么 |
 | --- | --- | --- |
-| calibrate | [references/calibration.md](references/calibration.md) | 接缝核对 → `qc_scan.py` 体检 → 表格对图/换图 → 书签核对 → 编辑 `calibrate/source.md` |
+| calibrate | [references/calibration.md](references/calibration.md) | 接缝核对 → 有文本层先 `textlayer_diff.py` 逐页对差／没有则 `qc_scan.py` 体检 → 表格对图/换图 → 书签核对 → 编辑 `calibrate/source.md` |
 | compose | [references/composition.md](references/composition.md) | 写 `compose-plan.json` 切章 → 撰写 `OEBPS/text/*.xhtml` 与 `book.json` |
 | check 报错 | [references/validation.md](references/validation.md) | 修正文层问题（内容、引用、MathML）；包内文件问题归脚本 |
 | 遇到反常现象 | [references/pitfalls.md](references/pitfalls.md) | 9 类坑的成因与处理，先查再动手 |
@@ -66,11 +66,20 @@ pdf2epub run
 | `ocr_images.py` | 一批图片逐张送解析后端，按图落成 Markdown（job_id 落盘、可续跑） | 输入是图片（截图、导图、拍照）而不是 PDF 时 |
 | `submit_jobs.py` | 分批提交解析任务：逐个落盘 job_id、被拒退避重试 | 大书 prepare 被限流/拒绝之后（见 pitfalls 教训 8） |
 | `fetch_jobs.py` | 按 `jobs.json` 接续取回已提交的解析任务 | 同上 |
-| `qc_scan.py` | OCR 体检：页级索引 + 六类全局检测，出 `qc-report.md` | **校准第一步**，先运行再动手 |
+| `prepare_loop.py` | 提交一片→取回一片，循环把整本书解析完（额度小、一次性提交必被拒时替代 prepare 的批量提交） | 提交额度小（如 400 `code 10010`）时，见 pitfalls 教训 8 |
+| `textlayer_diff.py` | 以 PDF 自带**文本层**为基准逐页对差，出 `layer-diff.md`（哪页缺哪段） | **原书有文本层时，这是校准第一步**，比通读省一个量级 |
+| `render_pages.py` | 按页号渲染页面图到 `calibrate/pages/` | 体检/对差点到的页没渲染过时补图 |
+| `calibrate_fix.py` | 按 `fix-plan.json` **一次写盘**：页面尾补内容（脚注/漏段）、页界断句合并、坏字形与 LaTeX 全局替换 | 校准的机械修复收敛到这一个入口（见 pitfalls 教训 8） |
+| `join_page_breaks.py` | 页界断句合并（先与文本层逐处验证，再改） | 只想做断句合并时；`calibrate_fix.py` 已内含 |
+| `qc_scan.py` | OCR 体检：页级索引 + 六类全局检测，出 `qc-report.md` | **校准第一步**（无文本层时），先运行再动手 |
 | `table_tool.py` | 表格台账 / 结构体检 / 对图核对清单 / 裁图换图 | 校准的表格专项（见 calibration.md） |
 | `toc_check.py` | 原书书签 vs 解析产物逐条核对，出 `toc-check.md` | 原书带书签时，校准前运行 |
+| `plan_from_outline.py` | 由 PDF 书签生成 `compose-plan.json` 草稿（前置页与索引仍要人工补） | 撰写前切章（见 composition.md） |
 | `compose_mathml.py` | `source.md` → 章节 XHTML（公式转 MathML） | 小书一键成稿（见 composition.md） |
 | `compose_book.py` | 按 `compose-plan.json` 切章组书 | 分章撰写（见 composition.md） |
+
+脚本产物一律落在运行目录里（`calibrate/`、`parsing/`、`build/`），不写回仓库；
+用于诊断的临时探针脚本留在运行目录即可，用过的能力固化进本表。
 
 ## 长文档策略
 
@@ -82,7 +91,12 @@ pdf2epub run
 - 章节边界不明时先 `python scripts/split_pdf.py "book.pdf" --list`；切出的
   分片**不要**再喂给 `pdf2epub init`——那会生成几个互不相干的 run，合不成一本书。
 - 大书解析任务用 `scripts/submit_jobs.py` 逐批提交并落盘 job_id（一次性全量
-  提交会被服务端限流/拒绝，且已提交任务无法接续）。
+  提交会被服务端限流/拒绝，且已提交任务无法接续）；若额度小到"批量提交必被拒"
+  （HTTP 400 `code 10010 当前提交任务数过多`），改用 `scripts/prepare_loop.py`
+  提交一片取回一片，同样按片核对接缝。
+- 校准同样按页段分批：**机械修复只走 `calibrate_fix.py` 一个入口**，不要写多个
+  脚本各自重写 `source.md`（会静默互相覆盖，见 pitfalls 教训 8）；改动依据逐条
+  写进 `calibrate/notes.md`。
 
 ## 硬性规矩
 
@@ -98,6 +112,8 @@ pdf2epub run
 - [ ] 书厚时确实按页段/章节分批完成，没有一次性处理整本
 - [ ] 解析：`parsing/boundary.md` 页数对账无问题，`BOUNDARY_CHECK` 告警已查看
 - [ ] 校准：每道缝的两页对照页面图核过，接缝衔接正常
+- [ ] 校准：原书带文本层时 `textlayer_diff.py` 已运行，差异页逐条判过（真缺内容补回／
+      代码行号与引号写法等差异记录后放过）
 - [ ] 校准：`qc_scan.py` 已运行，可疑处逐条对图确认，`notes.md` 已记录
 - [ ] 校准：表格对图核过（`table_tool.py check` + `pages`），读不动的已换图
 - [ ] 校准：原书带书签时 `toc_check.py` 已运行，缺失/粘连的标题已处理
