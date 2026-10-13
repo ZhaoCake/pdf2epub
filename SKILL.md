@@ -63,6 +63,7 @@ pdf2epub run
 | 脚本 | 功能 | 使用时机 |
 | --- | --- | --- |
 | `split_pdf.py` | 按书签/页数/页段切 PDF，出切分计划与清单 | 校准前摸清章节边界；需要分批作业时 |
+| `ocr_images.py` | 一批图片逐张送解析后端，按图落成 Markdown（job_id 落盘、可续跑） | 输入是图片（截图、导图、拍照）而不是 PDF 时 |
 | `submit_jobs.py` | 分批提交解析任务：逐个落盘 job_id、被拒退避重试 | 大书 prepare 被限流/拒绝之后（见 pitfalls 教训 8） |
 | `fetch_jobs.py` | 按 `jobs.json` 接续取回已提交的解析任务 | 同上 |
 | `qc_scan.py` | OCR 体检：页级索引 + 六类全局检测，出 `qc-report.md` | **校准第一步**，先运行再动手 |

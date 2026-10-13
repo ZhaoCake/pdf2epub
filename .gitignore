@@ -17,6 +17,7 @@ venv/
 oldtry/
 *.err
 *.log
+*.pdf
 
 # 密钥
 .env
