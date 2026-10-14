@@ -54,8 +54,10 @@ TRANSLATABLE = ("prose", "heading", "bullet", "bullets")
 #: 这些类型的 part 整段跳过：印刷目录/索引是"条目 + 页码"，按条目标题单独译
 SKIP_KINDS = ("toc", "index")
 
-#: 印刷目录/索引的"条目标题 + 页码"（页码可能是 "12, 50"）
-TOC_TAIL = re.compile(r"^(?P<title>.*?)[\s.．]*(?P<page>\d{1,3}(?:\s*,\s*\d{1,3})*)\s*$")
+#: 印刷目录/索引的"条目标题 + 页码"：页码可能是 "12, 50" 或 "1-1"（章-页）
+TOC_TAIL = re.compile(
+    r"^(?P<title>.*?)[\s.．]*(?P<page>\d+(?:[-–]\d+)?(?:\s*,\s*\d+(?:[-–]\d+)?)*)\s*$"
+)
 
 
 def needs_translation(line: str) -> bool:
@@ -164,28 +166,37 @@ def main() -> int:
                 continue
             jobs.append((i, marker, protect(text)))
 
-    # 印刷目录/索引：只译"条目标题"，页码与点线保持原样
-    toc_jobs: list[tuple[int, str]] = []
+    # 印刷目录/索引：只译"条目标题"，页码与点线保持原样；无页码的整行算标题
+    toc_jobs: list[tuple[int, str, str]] = []   # (行号, 待译标题, 保留的尾巴)
     for lo, hi in toc_ranges:
         for i in range(lo, min(hi, len(lines))):
-            match = TOC_TAIL.match(lines[i].strip())
-            if not match or not match.group("title").strip():
+            stripped = lines[i].strip()
+            if not stripped:
                 continue
-            title = re.sub(r"^#{1,4}\s+", "", match.group("title").strip())
-            if not needs_translation(title):
-                continue
-            toc_jobs.append((i, protect(title)))
+            title = re.sub(r"^#{1,4}\s+", "", stripped)
+            match = TOC_TAIL.match(title)
+            if match and match.group("title").strip():
+                head = match.group("title").strip()
+                pos = lines[i].find(head)
+                if pos < 0:
+                    continue
+                tail = lines[i][pos + len(head):]
+                if not needs_translation(head):
+                    continue
+                toc_jobs.append((i, protect(head), tail))
+            elif needs_translation(title) and len(title) <= 120:
+                toc_jobs.append((i, protect(title), ""))
 
     if args.limit:
         jobs = jobs[: args.limit]
 
     total_bytes = sum(len(text.encode("utf-8")) for _, _, text in jobs)
-    total_bytes += sum(len(text.encode("utf-8")) for _, text in toc_jobs)
+    total_bytes += sum(len(text.encode("utf-8")) for _, text, _ in toc_jobs)
     print(f"· 输入 {src_path}")
     print(f"· 待译 正文 {len(jobs)} 行 + 目录/索引条目 {len(toc_jobs)} 行，"
           f"共 {total_bytes} 字节"
           f"（缓存命中 {sum(1 for _, _, t in jobs if cache_key(t) in cache)}"
-          f"+{sum(1 for _, t in toc_jobs if cache_key(t) in cache)}）")
+          f"+{sum(1 for _, t, _ in toc_jobs if cache_key(t) in cache)}）")
     if args.dry_run:
         return 0
     if not jobs and not toc_jobs:
@@ -199,24 +210,50 @@ def main() -> int:
     # ---------------------------------------------------------------
     done: dict[int, str] = {}
     pending = [(i, marker, text) for i, marker, text in jobs if cache_key(text) not in cache]
-    toc_pending = [(i, text) for i, text in toc_jobs if cache_key(text) not in cache]
+    toc_pending = [(i, text, tail) for i, text, tail in toc_jobs if cache_key(text) not in cache]
     print(f"· 实际请求 正文 {len(pending)} 行 + 条目 {len(toc_pending)} 行，"
           f"按 ≤{trans.max_bytes} 字节分批")
 
     batch: list[tuple[int, str, str]] = []
+    skipped: list[str] = []
+
+    def save_cache() -> None:
+        # 逐批落盘：跑一半被限流/出错也不丢进度
+        cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=0), encoding="utf-8")
+
+    def translate_one(text: str) -> str | None:
+        """单行重试：批里有毒行时用来隔离。返回 None 表示这行翻不了。"""
+        try:
+            return client.translate_batched([text])[0]
+        except Exception as exc:  # noqa: BLE001 - 单行失败记录后跳过，不拖垮整本书
+            print(f"! 单行翻译失败（{exc}）：{text[:80]!r}", file=sys.stderr)
+            skipped.append(text)
+            return None
 
     def flush() -> None:
         nonlocal batch
         if not batch:
             return
         q_lines = [text for _, _, text in batch]
-        translated = client.translate_batched(q_lines)
+        try:
+            translated = client.translate_batched(q_lines)
+        except Exception as exc:  # noqa: BLE001 - 整批失败：降级成逐行，隔离坏行
+            print(f"! 批次失败（{exc}），降级逐行翻译 {len(batch)} 行", file=sys.stderr)
+            for index, marker, text in batch:
+                dst = translate_one(text)
+                if dst is not None:
+                    cache[cache_key(text)] = dst
+                    done[index] = marker + restore(dst)
+            batch = []
+            save_cache()
+            return
         if len(translated) != len(batch):
             sys.exit(f"返回行数 {len(translated)} != 请求 {len(batch)}，中止")
         for (index, marker, text), dst in zip(batch, translated):
             cache[cache_key(text)] = dst
             done[index] = marker + restore(dst)
         batch = []
+        save_cache()
 
     budget = trans.max_bytes
     for index, marker, text in pending:
@@ -227,29 +264,36 @@ def main() -> int:
 
     if toc_pending:
         # 条目标题一行一条送（片段回填按行拼），页码与点线不在请求里
-        translated = client.translate_batched([text for _, text in toc_pending])
-        for (index, text), dst in zip(toc_pending, translated):
-            cache[cache_key(text)] = restore(dst)
+        try:
+            translated = client.translate_batched([text for _, text, _ in toc_pending])
+            for (index, text, _), dst in zip(toc_pending, translated):
+                cache[cache_key(text)] = restore(dst)
+        except Exception as exc:  # noqa: BLE001 - 同样降级逐行
+            print(f"! 目录批次失败（{exc}），降级逐行", file=sys.stderr)
+            for index, text, _ in toc_pending:
+                dst = translate_one(text)
+                if dst is not None:
+                    cache[cache_key(text)] = restore(dst)
+        save_cache()
 
-    cache_path.write_text(json.dumps(cache, ensure_ascii=False, indent=0), encoding="utf-8")
+    if skipped:
+        skip_path = out_path.with_suffix(out_path.suffix + ".skipped.txt")
+        skip_path.write_text("\n".join(skipped) + "\n", encoding="utf-8")
+        print(f"! {len(skipped)} 行翻不了，原文保留，清单见 {skip_path.name}", file=sys.stderr)
 
     # ---------------------------------------------------------------
-    # 回填：缓存里有的一律用缓存（包括本次新译的）
+    # 回填：缓存里有的一律用缓存（包括本次新译的）；没缓存的保留原文
     # ---------------------------------------------------------------
     result = list(lines)
     for index, marker, text in jobs:
         if index in done:
             result[index] = done[index]
-        else:
+        elif cache_key(text) in cache:
             result[index] = marker + restore(cache[cache_key(text)])
-    for index, text in toc_jobs:
-        translated = cache[cache_key(text)]
-        original = lines[index]
-        match = TOC_TAIL.match(original.strip())
-        if match and match.group("title"):
-            head_len = original.index(match.group("title")) if match.group("title") in original else 0
-            original = original[head_len:]
-            result[index] = translated + original[len(match.group("title")):]
+    for index, text, tail in toc_jobs:
+        if cache_key(text) not in cache:
+            continue
+        result[index] = restore(cache[cache_key(text)]) + tail
 
     out_path.write_text("\n".join(result) + "\n", encoding="utf-8")
     print(f"· 已写出 {out_path}（缓存 {len(cache)} 行 -> {cache_path.name}）")
