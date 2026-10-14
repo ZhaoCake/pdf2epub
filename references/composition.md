@@ -46,6 +46,14 @@ python scripts/compose_book.py --run .pdf2epub/runs/<id>           # 写章节 +
 ```
 
 它是示例脚本而非流水线的一步——章节怎么切、标题叫什么，由撰写者决定并复核。
+
+**代码密集的书（用户手册、教程）优先用 [`compose_codebook.py`](../scripts/compose_codebook.py)**：
+`compose_book.py` 的 `is_code()` 只认 RTL 关键字，而解析后端**不一定输出 ``` 围栏**
+（BSC 用户手册 77 页一处围栏都没有），于是"`# bsc -u -sim DUT.bsv` + 一串
+`… created: xxx`"这种终端会话整段被排成 `<p>`——比例字体加 2em 首行缩进，缩进层次
+全丢。`compose_codebook.py` 改成行级分类再合并同类行，同一份 `compose-plan.json`，
+另外多两种 `kind`：`toc`（印刷目录）与 `index`（索引），条目页码右对齐、缩进条目
+用 `.toc-sub`。跑完 `--code-map` 逐段复核代码判定，别只看章节字数。
 脚本执行完**必须检查**：
 
 - 切出的章数是否正确（标题层级启发式按特定后端产物调整过；换后端先复核层级）

@@ -323,41 +323,52 @@ def _render_toc(nodes: list[dict[str, Any]], indent: int = 4) -> list[str]:
     return lines
 
 
-def _landmarks(spine: list[ManifestItem], cover_href: str = "") -> list[tuple[str, str, str]]:
+def _labels(language: str) -> dict[str, str]:
+    """导航里的文字标签：中文书用中文，其余用英文（缺省按中文，保持原行为）。"""
+    if (language or "zh").lower().startswith("zh"):
+        return {"toc": "目录", "cover": "封面", "body": "正文"}
+    return {"toc": "Contents", "cover": "Cover", "body": "Body"}
+
+
+def _landmarks(
+    spine: list[ManifestItem], cover_href: str = "", labels: dict[str, str] | None = None
+) -> list[tuple[str, str, str]]:
     """书签导航。
 
     只放**确实在 spine 里**的目标——landmark 指向非 spine 项会被 EPUBCheck
     判为 RSC-011（"引用了不是 spine 项的资源"）。导航文档自身就不在 spine 里，
     所以"目录"这一条不能指向 nav.xhtml。
     """
+    labels = labels or _labels("zh")
     entries: list[tuple[str, str, str]] = []
     if cover_href:
-        entries.append(("cover", cover_href, "封面"))
+        entries.append(("cover", cover_href, labels["cover"]))
     body = next((item.href for item in spine if item.href != cover_href), "")
     if body:
-        entries.append(("bodymatter", body, "正文"))
+        entries.append(("bodymatter", body, labels["body"]))
     return entries
 
 
 def _nav_xhtml(book: BookSpec, entries: list[dict[str, Any]], spine: list[ManifestItem], cover_href: str) -> str:
     lang = xml_escape(book.language or "zh")
+    labels = _labels(book.language)
     lines = [
         '<?xml version="1.0" encoding="utf-8"?>',
         "<!DOCTYPE html>",
         f'<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" '
         f'xml:lang="{lang}" lang="{lang}">',
         "  <head>",
-        "    <title>目录</title>",
+        f"    <title>{labels['toc']}</title>",
         '    <link rel="stylesheet" type="text/css" href="style/base.css"/>',
         "  </head>",
         "  <body>",
         '    <nav epub:type="toc" id="toc">',
-        "      <h1>目录</h1>",
+        f"      <h1>{labels['toc']}</h1>",
     ]
     lines.extend(_render_toc(_nest_toc(entries), indent=6))
     lines.append("    </nav>")
 
-    landmarks = _landmarks(spine, cover_href)
+    landmarks = _landmarks(spine, cover_href, labels)
     if landmarks:
         lines.extend(
             [

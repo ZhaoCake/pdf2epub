@@ -68,6 +68,8 @@ pdf2epub run
 | `fetch_jobs.py` | 按 `jobs.json` 接续取回已提交的解析任务 | 同上 |
 | `prepare_loop.py` | 提交一片→取回一片，循环把整本书解析完（额度小、一次性提交必被拒时替代 prepare 的批量提交） | 提交额度小（如 400 `code 10010`）时，见 pitfalls 教训 8 |
 | `textlayer_diff.py` | 以 PDF 自带**文本层**为基准逐页对差，出 `layer-diff.md`（哪页缺哪段） | **原书有文本层时，这是校准第一步**，比通读省一个量级 |
+| `layer_token_diff.py` | 同上但按 **token** 比（含全书级、可对当前 `source.md`）：抓 `Bluetcl→Bluetooth`、`-Xl→-X1` 这类不足 30 字符的短词误读 | 数字版 PDF 校准的第二道网，`textlayer_diff.py` 之后跑 |
+| `table_row_check.py` | 表格**逐行**与文本层核对，抓"结构完好但说明整列串位" | 表格专项对图前先跑；结构体检（`table_tool.py check`）看不见串位 |
 | `render_pages.py` | 按页号渲染页面图到 `calibrate/pages/` | 体检/对差点到的页没渲染过时补图 |
 | `calibrate_fix.py` | 按 `fix-plan.json` **一次写盘**：页面尾补内容（脚注/漏段）、页界断句合并、坏字形与 LaTeX 全局替换 | 校准的机械修复收敛到这一个入口（见 pitfalls 教训 8） |
 | `join_page_breaks.py` | 页界断句合并（先与文本层逐处验证，再改） | 只想做断句合并时；`calibrate_fix.py` 已内含 |
@@ -77,6 +79,7 @@ pdf2epub run
 | `plan_from_outline.py` | 由 PDF 书签生成 `compose-plan.json` 草稿（前置页与索引仍要人工补） | 撰写前切章（见 composition.md） |
 | `compose_mathml.py` | `source.md` → 章节 XHTML（公式转 MathML） | 小书一键成稿（见 composition.md） |
 | `compose_book.py` | 按 `compose-plan.json` 切章组书 | 分章撰写（见 composition.md） |
+| `compose_codebook.py` | 同上，但用**行级分类**判代码块，能把没有围栏的终端会话/清单排成 `<pre>`；印刷目录与索引另作条目页 | 技术手册这类代码密集的书（解析后端不输出 ``` 围栏时） |
 
 脚本产物一律落在运行目录里（`calibrate/`、`parsing/`、`build/`），不写回仓库；
 用于诊断的临时探针脚本留在运行目录即可，用过的能力固化进本表。
