@@ -54,6 +54,29 @@ python scripts/compose_book.py --run .pdf2epub/runs/<id>           # 写章节 +
 全丢。`compose_codebook.py` 改成行级分类再合并同类行，同一份 `compose-plan.json`，
 另外多两种 `kind`：`toc`（印刷目录）与 `index`（索引），条目页码右对齐、缩进条目
 用 `.toc-sub`。跑完 `--code-map` 逐段复核代码判定，别只看章节字数。
+
+## 出译本：translate_blocks.py → compose_codebook.py --source/--plan
+
+翻译走 [`translate_blocks.py`](../scripts/translate_blocks.py)（百度翻译大模型文本
+翻译 API）：**只送 prose/标题/列表行**，代码清单、表格、公式、印刷目录的页码根本
+不进请求；行内 `` `code` `` 与 `$math$` 包成 XML 标签再送（服务端原样保留、标签内
+不翻）。产物是 `source.zh.md` + 行级缓存 `*.cache.json`，`--plan` 同时译撰写计划
+标题（原标题进 `strip`，撰写时好摘）并置 `language`。然后：
+
+```bash
+python scripts/compose_codebook.py --run <id> \
+    --source .pdf2epub/runs/<id>/calibrate/source.zh.md \
+    --plan   .pdf2epub/runs/<id>/build/compose-plan.zh.json
+pdf2epub run --run <id> --force check
+```
+
+**同一个 run 的 build/ 只放一个语言版本**：先包出来的换名存好（如
+`<name>.en.epub`），再撰写另一种语言覆盖 `build/` 重包。两个坑都实测过：
+
+- 服务端不保证按行返回——会把一行按句号/点线再拆成多条，好在每条带 `src`
+  片段，按片段累计、拼满一行收一行就能对齐（`baidutrans.translate_lines`）；
+- 机翻会给代码行补中文分号（`reg_2(y);；`）。代码行被判成 prose 就会中招，
+  所以分类规则改动后**必须重跑 `--code-map`** 并抽查代码密集的章节。
 脚本执行完**必须检查**：
 
 - 切出的章数是否正确（标题层级启发式按特定后端产物调整过；换后端先复核层级）

@@ -175,7 +175,8 @@ def classify_line(line: str) -> str:
         if pattern.search(s):
             return "code"
     for pattern in MEDIUM:
-        if pattern.match(s):
+        # search 而非 match：`;` 结尾这类**后缀**规则锚在行尾
+        if pattern.search(s):
             if pattern.pattern.startswith("^[A-Za-z_][\\w$.{}\\[\\]<>:/+-]*$"):
                 # 单 token 要够长、带技术特征，否则 "and"、"Bluesim" 也会算代码
                 if len(s) < 8 or not any(ch in s for ch in "_./$("):
@@ -346,6 +347,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="代码密集型技术书的撰写脚本")
     parser.add_argument("--run", help="运行 ID，缺省用最近一次")
     parser.add_argument("--plan", help="撰写计划（缺省 <build>/compose-plan.json）")
+    parser.add_argument("--source", help="要撰写的校准稿（缺省该 run 的 calibrate/source.md）")
     parser.add_argument("--audit", action="store_true", help="只出审计，不写文件")
     parser.add_argument("--code-map", action="store_true", help="打印代码块判定结果")
     parser.add_argument("--only", help="只写这一个章节")
@@ -364,7 +366,10 @@ def main() -> int:
         print(f"找不到撰写计划：{plan_path}", file=sys.stderr)
         return 1
     plan = json.loads(plan_path.read_text(encoding="utf-8"))
-    src_path = run.calibrate_dir / "source.md"
+    src_path = Path(args.source) if args.source else run.calibrate_dir / "source.md"
+    if not src_path.is_file():
+        print(f"找不到校准稿：{src_path}", file=sys.stderr)
+        return 1
     src_lines = src_path.read_text(encoding="utf-8").splitlines()
     kinds = [classify_line(line) for line in src_lines]
 
@@ -399,12 +404,19 @@ def main() -> int:
         labels = {title, *(part.get("strip") or [])}
         if number:
             labels.add(f"第{number}章 {title}")
+        stripped_first = False
         while start < end:
             head = HEAD.match(src_lines[start].strip())
-            if head and (head.group(2).strip() in labels
-                         or re.fullmatch(r"第\s*\d+\s*章", head.group(2).strip())):
-                start += 1
-                continue
+            if head:
+                text = head.group(2).strip()
+                if kind == "chapter" and not stripped_first:
+                    # 计划里的 title 是权威——校准稿被翻译过后，正文标题对不上原文
+                    stripped_first = True
+                    start += 1
+                    continue
+                if text in labels or re.fullmatch(r"第\s*\d+\s*章", text):
+                    start += 1
+                    continue
             if not src_lines[start].strip():
                 start += 1
                 continue

@@ -80,6 +80,7 @@ pdf2epub run
 | `compose_mathml.py` | `source.md` → 章节 XHTML（公式转 MathML） | 小书一键成稿（见 composition.md） |
 | `compose_book.py` | 按 `compose-plan.json` 切章组书 | 分章撰写（见 composition.md） |
 | `compose_codebook.py` | 同上，但用**行级分类**判代码块，能把没有围栏的终端会话/清单排成 `<pre>`；印刷目录与索引另作条目页 | 技术手册这类代码密集的书（解析后端不输出 ``` 围栏时） |
+| `translate_blocks.py` | 调百度翻译（大模型文本翻译 API）译校准稿：只送正文行，代码/表格/公式/页码不进请求；行级缓存，重跑不重复计费；`--plan` 连撰写计划标题一起译 | 出双语版/译本时。凭据放 `.env` 的 `BAIDU_TRANS_*` |
 
 脚本产物一律落在运行目录里（`calibrate/`、`parsing/`、`build/`），不写回仓库；
 用于诊断的临时探针脚本留在运行目录即可，用过的能力固化进本表。

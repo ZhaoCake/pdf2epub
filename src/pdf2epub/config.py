@@ -147,6 +147,37 @@ class ValidateConfig:
     fail_on_severity: str = "ERROR"
 
 
+@dataclass
+class BaiduTransConfig:
+    """百度翻译开放平台的文本翻译（scripts/translate_blocks.py 用）。
+
+    凭据放 .env：BAIDU_TRANS_API_KEY（推荐）或 BAIDU_TRANS_APPID + BAIDU_TRANS_SECRET。
+    model/prompt/domain 的**参数取值**以 https://fanyi-api.baidu.com/doc/21 为准，
+    这里只做透传，留空不发送。
+    """
+
+    base_url: str = "https://fanyi-api.baidu.com"
+    path: str = "/ait/api/aiTextTranslate"
+    api_key_env: str = "BAIDU_TRANS_API_KEY"
+    appid_env: str = "BAIDU_TRANS_APPID"
+    secret_env: str = "BAIDU_TRANS_SECRET"
+    #: 模型选择（"大模型翻译"/"机器翻译"），参数名待与 doc/21 核实，留空不发送
+    model: str = ""
+    #: 翻译指令（仅大模型支持），留空不发送
+    prompt: str = ""
+    #: 领域模型，留空不发送
+    domain: str = ""
+    from_lang: str = "en"
+    to_lang: str = "zh"
+    #: 单次请求 q 的字节预算（服务端硬限 6000，留余量给 appid 等表单字段）
+    max_bytes: int = 5500
+    #: 两次请求的最小间隔（秒）。QPS 以控制台显示为准，默认按最保守的 1 QPS
+    min_interval: float = 1.0
+    timeout: float = 60.0
+    max_retries: int = 4
+    retry_backoff: float = 2.0
+
+
 # ---------------------------------------------------------------------------
 # 顶层配置
 # ---------------------------------------------------------------------------
@@ -165,6 +196,7 @@ class Config:
     calibrate: CalibrateConfig = field(default_factory=CalibrateConfig)
     compose: ComposeConfig = field(default_factory=ComposeConfig)
     validate: ValidateConfig = field(default_factory=ValidateConfig)
+    baidutrans: BaiduTransConfig = field(default_factory=BaiduTransConfig)
 
     #: 配置文件来源路径，主要用于诊断
     source_path: str = ""

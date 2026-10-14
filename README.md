@@ -11,6 +11,8 @@
 
 LLM模型：只是基本的文本核对工作，使用DeepSeek V4.1 Flash已经足够。
 
+文本翻译：目前已经支持文本翻译功能，可以输入英文pdf，输出中文epub了！
+
 </div>
 
 ## 背景
@@ -42,6 +44,30 @@ EPUB 作为重排格式，更适合小屏阅读设备。因此一条自然的路
 说明：EPUB 中**部分表格以图片形式呈现**，这是有意的设计——对于难以可靠识别的表格
 （列数多、结构错位、单元格含公式），要求 LLM 不强行转换为 HTML，而是直接从原书
 截取图像插入，以保证内容不失真；其余表格仍保留为可搜索、可重排的普通表格。
+
+## 更新记录
+
+- **2026-10-14** 接入百度翻译大模型文本翻译 API：`translate_blocks.py` 按行翻译
+  校准稿——代码清单、表格、公式与目录页码不进请求，行内代码/公式包成 XML 标签
+  由服务端原样保留，行级缓存重跑不重复计费；同一份校准稿可出双语 EPUB
+- **2026-10-14** 代码密集书组稿：`compose_codebook.py` 行级判定代码块，没有围栏的
+  终端会话、Verilog 清单能正确排成代码；印刷目录与索引单独成条目页；导航标签按
+  书语言自适应；`table_row_check.py` 抓"结构完好但说明串位"的表格
+- **2026-10-13** 校准工具链固化：`textlayer_diff.py`（原书有文本层时逐页对差）、
+  `calibrate_fix.py`（机械修复收敛到单一入口）、`qc_scan.py`（OCR 体检）；
+  `ocr_images.py` 支持输入是图片而非 PDF 的场景
+- **2026-10-09** 文档按关卡拆分：根目录 `SKILL.md` 驱动，`references/` 下
+  calibration / composition / validation / pitfalls 四份手册供人与 agent 按需加载
+- **2026-10-08** 表格、书签、OCR 体检脚本固化：`table_tool.py`（表格专项：结构体检、
+  对图核对、裁图换图）、`toc_check.py`（书签核对）；实测高频问题清单沉淀进
+  `references/calibration.md`
+- **2026-10-03** 组稿脚本化：`compose_book.py` 按撰写计划（`compose-plan.json`）
+  切章组书，不再让脚本猜章节边界
+- **2026-10-02** 解析后端换成 PaddleOCR-VL：20 页分片并行解析 + 交界处自动校验
+  （页数对账、接缝正文检查，结论落 `parsing/boundary.md`）
+- **2026-10-01** 项目成型：脚本只做搬运、截图、打包、校验；内容判断与转写交给
+  LLM，不引入 Markdown→XHTML 转换器与确定性修复引擎；随后修好 `.env` 不生效、
+  EPUBCheck 配置语义与 bbox 坐标系识别
 
 ## 快速开始
 
@@ -112,12 +138,36 @@ pdf2epub run    # → 0  打包并通过 EPUBCheck，产物输出至 output/<nam
 配置优先级：`内置默认 < .env < pdf2epub.toml < 环境变量 < 命令行`。
 
 - 解析服务 Token 写入 `.env`：`PADDLE_TOKEN=...`
+- 出译本需要百度翻译凭据，见[「获取百度翻译密钥」](#获取百度翻译密钥)
 - 其余选项见 [`pdf2epub.toml`](pdf2epub.toml) 内注释，可通过 `PDF2EPUB__SECTION__KEY`
   形式的环境变量覆盖
+
+### 获取百度翻译密钥
+
+出译本（`scripts/translate_blocks.py`）调用百度翻译的**大模型文本翻译 API**，
+需要三样凭据，都在[百度翻译开放平台](https://fanyi-api.baidu.com)的控制台里：
+
+1. 用百度账号登录并注册为开发者；建议完成**个人实名认证**——未认证账号
+   只支持 `zh↔en` 且免费额度很小。
+2. **管理控制台 → 开发者信息**：拿到 `APPID`（一串数字）与 `密钥`（32 位串）。
+3. 控制台的 **API Key 管理**页：创建一个 **API Key**（大模型文本翻译 API
+   推荐用它鉴权，与上一步的"密钥"不是同一个东西）。
+4. 控制台**开发者服务**：开通"大模型文本翻译 API"（不开通调用会被拒）。
+5. 写进项目根目录的 `.env`：
+
+   ```dotenv
+   BAIDU_TRANS_APPID=...      # 开发者信息页的 APPID
+   BAIDU_TRANS_SECRET=...     # 同页的"密钥"（sign 鉴权用）
+   BAIDU_TRANS_API_KEY=...    # API Key 管理页创建的 Key（Bearer 鉴权用）
+   ```
+
+免费额度与 QPS 以控制台显示为准。翻译按行缓存（`*.cache.json`），同一行
+重跑不重复计费；代码清单、表格、公式与印刷目录的页码不进请求，不会被机翻。
 
 ## 环境要求
 
 - Python 3.10+；PaddleOCR Token（在 AI Studio 创建）
+- 出译本另需百度翻译凭据（见[「获取百度翻译密钥」](#获取百度翻译密钥)；不出译本不用配）
 - 页面渲染依赖 `pypdfium2` + `Pillow`（即 `[render]` extra；未安装时将退化为
   纯文本校准并产生告警）
 - EPUBCheck（依赖 Java）：将 jar 解压至 `tools/` 目录即可被自动发现，或通过
